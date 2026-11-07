@@ -857,6 +857,93 @@ def cuff_back(y0):
     s += g(teardrop(26, 10), 520, y + 60, 180) + dot((520, y + 98), 6)
     return s
 
+# ---------- BACK v4: single trail, finger → wrist, everything else bare (reference photo) ----------
+def bez_pts(p0, p1, p2, p3, n=60):
+    return [tuple((1 - t) ** 3 * p0[i] + 3 * (1 - t) ** 2 * t * p1[i] + 3 * (1 - t) * t * t * p2[i] + t ** 3 * p3[i] for i in range(2)) for t in [k / n for k in range(n + 1)]]
+
+def poly_d(pts): return "M" + " L".join(f"{f(x)},{f(y)}" for x, y in pts)
+
+def offset(pts, d):
+    out = []
+    for i, p in enumerate(pts):
+        a = pts[max(0, i - 1)]; b = pts[min(len(pts) - 1, i + 1)]
+        L_ = dist(a, b) or 1; nx, ny = -(b[1] - a[1]) / L_, (b[0] - a[0]) / L_
+        out.append((p[0] + nx * d, p[1] + ny * d))
+    return out
+
+def bold_flower(r, n, heart=True):
+    s = ""
+    for i in range(n):
+        a = i * 360 / n
+        if heart:
+            d = (f"M0,{f(-r * 0.16)} C{f(r * 0.46)},{f(-r * 0.26)} {f(r * 0.6)},{f(-r * 0.95)} {f(r * 0.22)},{f(-r)} "
+                 f"C{f(r * 0.08)},{f(-r)} 0,{f(-r * 0.9)} 0,{f(-r * 0.82)} C0,{f(-r * 0.9)} {f(-r * 0.08)},{f(-r)} {f(-r * 0.24)},{f(-r)} "
+                 f"C{f(-r * 0.6)},{f(-r * 0.95)} {f(-r * 0.46)},{f(-r * 0.26)} 0,{f(-r * 0.16)} Z")
+        else:
+            d = (f"M0,{f(-r * 0.16)} C{f(r * 0.46)},{f(-r * 0.25)} {f(r * 0.52)},{f(-r)} 0,{f(-r)} "
+                 f"C{f(-r * 0.52)},{f(-r)} {f(-r * 0.46)},{f(-r * 0.25)} 0,{f(-r * 0.16)} Z")
+        i_ = cid()
+        sh = ""
+        for k in range(-7, 8):   # shading strokes from the petal edge in towards the centre
+            t = k / 7
+            sh += line((t * r * 0.55, -r * (0.92 - 0.1 * abs(t))), (t * r * 0.16, -r * 0.42), 1.3, INK2)
+        s += f'<g transform="rotate({f(a)})"><clipPath id="{i_}"><path d="{d}"/></clipPath><g clip-path="url(#{i_})">{sh}</g>'
+        s += f'<path d="{d}" fill="none" stroke="{INK}" stroke-width="5" stroke-linejoin="round"/></g>'
+    s += circ((0, 0), r * 0.15, 4) + dot((0, 0), r * 0.06)
+    return s
+
+def feather_leaf(sz):
+    # wide end up, tail curling into a spiral at the bottom
+    d = (f"M0,{f(sz * 0.55)} C{f(-sz * 0.55)},{f(sz * 0.2)} {f(-sz * 0.5)},{f(-sz * 0.55)} {f(sz * 0.1)},{f(-sz * 0.6)} "
+         f"C{f(sz * 0.6)},{f(-sz * 0.6)} {f(sz * 0.55)},{f(-sz * 0.05)} 0,{f(sz * 0.55)} Z")
+    i_ = cid()
+    s = f'<clipPath id="{i_}"><path d="{d}"/></clipPath><g clip-path="url(#{i_})">'
+    for k in range(-12, 13):   # vein strokes
+        y = k * sz * 0.05
+        s += f'<path d="M{f(-sz * 0.05)},{f(y + sz * 0.1)} Q{f(sz * 0.2)},{f(y - sz * 0.05)} {f(sz * 0.6)},{f(y - sz * 0.3)}" fill="none" stroke="{INK2}" stroke-width="1.3"/>'
+    s += "</g>"
+    s += f'<path d="M0,{f(sz * 0.5)} C{f(-sz * 0.1)},{f(sz * 0.1)} {f(-sz * 0.05)},{f(-sz * 0.3)} {f(sz * 0.12)},{f(-sz * 0.55)}" fill="none" stroke="{INK}" stroke-width="3"/>'
+    s += f'<path d="{d}" fill="none" stroke="{INK}" stroke-width="5" stroke-linejoin="round"/>'
+    # tail curl
+    s += f'<path d="M0,{f(sz * 0.55)} C{f(-sz * 0.2)},{f(sz * 0.8)} {f(-sz * 0.5)},{f(sz * 0.75)} {f(-sz * 0.45)},{f(sz * 0.55)}" fill="none" stroke="{INK}" stroke-width="5" stroke-linecap="round"/>'
+    s += g(spiral(sz * 0.13, 1.7, 4.5), -sz * 0.33, sz * 0.58, 200)
+    return s
+
+def scroll_vine(p0, p1, p2, p3):
+    pts = bez_pts(p0, p1, p2, p3, 80)
+    s = f'<path d="{poly_d(pts)}" fill="none" stroke="{INK}" stroke-width="6.5" stroke-linecap="round"/>'
+    # ladder band alongside the middle stretch
+    seg = pts[18:52]
+    off = offset(seg, 13)
+    s += f'<path d="{poly_d(off)}" fill="none" stroke="{INK}" stroke-width="3"/>'
+    for k in range(0, len(seg), 2):
+        s += line(seg[k], off[k], 1.6)
+    # curls alternating either side, each with a small filled teardrop
+    for j, idx in enumerate([8, 26, 44, 60, 72]):
+        p = pts[idx]; q = pts[idx + 2]; a_ = ang(p, q); side = 1 if j % 2 == 0 else -1
+        n_ = (-(q[1] - p[1]), q[0] - p[0]); L_ = math.hypot(*n_); n_ = (n_[0] / L_ * side, n_[1] / L_ * side)
+        tip = (p[0] + n_[0] * 40, p[1] + n_[1] * 40)
+        s += f'<path d="M{f(p[0])},{f(p[1])} Q{f(p[0] + n_[0] * 34 + (q[0] - p[0]) * 8)},{f(p[1] + n_[1] * 34 + (q[1] - p[1]) * 8)} {f(tip[0])},{f(tip[1])}" fill="none" stroke="{INK}" stroke-width="5" stroke-linecap="round"/>'
+        s += g(spiral(13, 1.7, 4.5), tip[0], tip[1], a_)
+        s += g(teardrop(24, 8), p[0] + n_[0] * 12, p[1] + n_[1] * 12, a_ + 90 * side + 180)
+    s += g(spiral(13, 1.8, 4.5), p3[0], p3[1] - 6)
+    return s
+
+def back_art():
+    out = []
+    # flower near the wrist (5 petals) and the feather leaf leading up into the hand
+    out.append(g(bold_flower(74, 5, heart=False), 536, 1300, 10))
+    out.append(g(feather_leaf(140), 560, 1135, 32))
+    # big four-petal heart flower on the back of the hand
+    out.append(g(bold_flower(98, 4), 512, 975, 38))
+    # scroll from the flower up the index finger
+    out.append(scroll_vine((452, 905), (400, 850), (392, 800), (385, 760)))
+    out.append(scroll_vine((385, 760), (370, 680), (360, 600), (350, 520)))
+    # dot chains
+    out.append(dot_chain([(470, 1350), (430, 1270), (432, 1180), (450, 1110), (468, 1072)], 13, r=5.2))
+    out.append(dot_chain([(600, 1015), (640, 930), (628, 850), (585, 790)], 13, r=5.2))
+    return out
+
 if __name__ == "__main__":
     style = sys.argv[1] if len(sys.argv) > 1 else "cursive"
     build("palm", style, f"palm_{style}.svg")
