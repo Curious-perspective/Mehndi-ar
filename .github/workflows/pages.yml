@@ -2,7 +2,10 @@ name: Deploy to GitHub Pages
 # main is served at the site root; dev is served at /dev/ for previewing
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
+  workflow_run:
+    workflows: ["Dev pushed"]
+    types: [completed]
   workflow_dispatch:
 permissions:
   contents: read

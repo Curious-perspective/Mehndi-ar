@@ -1,0 +1,10 @@
+name: Dev pushed
+# Relay: a push to dev triggers the Pages deploy (which runs on main, as the Pages environment requires)
+on:
+  push:
+    branches: [dev]
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "dev updated"
