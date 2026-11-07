@@ -1,3 +1,4 @@
+import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2, numpy as np, json, importlib.util
 from scipy.spatial import Delaunay
 spec = importlib.util.spec_from_file_location("gen", "gen.py"); gen = importlib.util.module_from_spec(spec); spec.loader.exec_module(gen)
@@ -10,24 +11,24 @@ def to_tex(raw_bgr, out):
     a = cv2.resize(a, None, fx=K, fy=K, interpolation=cv2.INTER_AREA)
     t = np.zeros((*a.shape, 4), np.uint8); t[..., 0], t[..., 1], t[..., 2] = INK; t[..., 3] = (a * 255).astype(np.uint8)
     cv2.imwrite(out, t, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+def alpha_of(raw):
+    lum = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY).astype(np.float32); s = float(np.median(lum))
+    return np.clip((s - lum) / (s - 40), 0, 1)
+cuff = alpha_of(cv2.imread("tex_cuff_raw.png")[:1650, :1000])
+# bend: bands curve like a ring seen around the wrist (edges rise towards the hand)
+H_, W_ = cuff.shape; cx = 520.0; hw = 300.0; sag = 26.0
+xs, ys = np.meshgrid(np.arange(W_, dtype=np.float32), np.arange(H_, dtype=np.float32))
+mapy = ys + sag * np.clip(((xs - cx) / hw) ** 2, 0, 2.5)
+cuff_b = cv2.remap(cuff, xs, mapy.astype(np.float32), cv2.INTER_LINEAR, borderValue=0)
 for v in "ab":
-    to_tex(cv2.imread(f"tex_palm_{v}_raw.png")[:1650, :1000], f"palm_{v}.png")
+    a = np.maximum(alpha_of(cv2.imread(f"tex_palm_{v}_raw.png")[:1650, :1000]), cuff_b)
+    a = cv2.resize(a, None, fx=K, fy=K, interpolation=cv2.INTER_AREA)
+    t = np.zeros((*a.shape, 4), np.uint8); t[..., 0], t[..., 1], t[..., 2] = INK; t[..., 3] = (a * 255).astype(np.uint8)
+    cv2.imwrite(f"palm_{v}.png", t, [cv2.IMWRITE_PNG_COMPRESSION, 9])
 bw = cv2.imread("back_warped.png", cv2.IMREAD_UNCHANGED)
 cv2.imwrite("back_tex.png", cv2.resize(bw, None, fx=K, fy=K, interpolation=cv2.INTER_AREA), [cv2.IMWRITE_PNG_COMPRESSION, 9])
 # mesh: template landmarks + extra anchor points (same recipe the page uses live)
-def extra(lm):
-    w, m9, i5, p17 = lm[0], lm[9], lm[5], lm[17]
-    u = m9 - w; sc = np.linalg.norm(u); u = u / sc; n = np.array([-u[1], u[0]]); pw = np.linalg.norm(i5 - p17)
-    pts = []
-    for k in (0.0, 0.45, 0.9, 1.35):
-        c = w - u * sc * k
-        for j in (-0.75, -0.35, 0.0, 0.35, 0.75): pts.append(c + n * pw * j)
-    for t in (0.3, 0.65):
-        c = w + u * sc * t; pts += [c + n * pw * 0.75, c - n * pw * 0.75]
-    # beyond the fingertips so tip caps are inside triangles
-    for i, j in ((4, 3), (8, 7), (12, 11), (16, 15), (20, 19)):
-        d = lm[i] - lm[j]; pts.append(lm[i] + d * 0.6)
-    return np.array(pts)
+from meshdef import extra
 T = np.array([gen.L[i] for i in range(21)], float)
 P = np.vstack([T, extra(T)])
 tri = Delaunay(P).simplices.tolist()

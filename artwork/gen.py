@@ -446,7 +446,7 @@ def build(side, fontfile, outname, art_only=False, mirror_names=False):
             body.append(a)
     lm_json = json.dumps({str(k): v for k, v in L.items()})
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" data-landmarks='{lm_json}' data-side="{side}">
-<defs><mask id="hand"><rect width="{W}" height="{H}" fill="black"/>{hand_shapes("white")}</mask></defs>
+<defs><mask id="hand"><rect width="{W}" height="{H}" fill="black"/>{hand_shapes("white", MASK_EXTRA)}</mask></defs>
 {f'<rect width="{W}" height="{H}" fill="{SKIN}"/>' if art_only else f'<rect width="{W}" height="{H}" fill="#fbf6ef"/><g id="skin">{hand_shapes(EDGE, 2)}{hand_shapes(SKIN)}</g>'}
 <g id="art" mask="url(#hand)">{"".join(body)}</g>
 </svg>'''
@@ -530,6 +530,8 @@ def names_hand(cx, cy, style):
 
 # ---------- PALM v3: one connected composition; regions divided by thick outlines and filled with simple patterns ----------
 THICK = 5.0
+INCLUDE_CUFF = True
+MASK_EXTRA = 0
 _cid = [0]
 def cid(p="c"):
     _cid[0] += 1; return f"{p}{_cid[0]}"
@@ -597,7 +599,7 @@ def finger_column(fi):
     # distal: solid cap (tip end) over a thin band
     a = lerp(p3, p4, 0.38)
     tipdir = ((p4[0] - p3[0]) / dist(p3, p4), (p4[1] - p3[1]) / dist(p3, p4))
-    s += line(a, (p4[0] + tipdir[0] * wd * 0.1, p4[1] + tipdir[1] * wd * 0.1), wd * 1.02, FILL)
+    s += line(a, (p4[0] - tipdir[0] * wd * 0.22, p4[1] - tipdir[1] * wd * 0.22), wd * 0.92, FILL)
     s += seg(p3, lerp(p3, p4, 0.38), lambda w_, L_: pat_dots(-w_, -L_ / 2, w_, L_ / 2, 8, 1.5))
     s += thick_across(lerp(p3, p4, 0.36), p4, p3, 3.4)
     if fi == 0:
@@ -691,11 +693,12 @@ def palm_art():
     for fi in range(5):
         out.append(finger_column(fi))
     # cuff + forearm
-    out.append(cuff3(1196))
+    if INCLUDE_CUFF: out.append(cuff3(1196))
     return out
 
+CUFF_X = (380, 660)
 def cuff3(y0):
-    xl, xr = 380, 660
+    xl, xr = CUFF_X
     s = ""; y = y0
     def hl(y, w=THICK): return line((xl, y), (xr, y), w)
     def bandfill(ya, yb, pat):
@@ -944,6 +947,14 @@ def back_art():
     out.append(dot_chain([(470, 1350), (430, 1270), (432, 1180), (450, 1110), (468, 1072)], 13, r=5.2))
     out.append(dot_chain([(600, 1015), (640, 930), (628, 850), (585, 790)], 13, r=5.2))
     return out
+
+def build_cuff(outname, xl=230, xr=810):
+    global CUFF_X
+    CUFF_X = (xl, xr)
+    body = cuff3(1196)
+    CUFF_X = (380, 660)
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}"><rect width="{W}" height="{H}" fill="{SKIN}"/>{body}</svg>'
+    open(outname, "w").write(svg)
 
 if __name__ == "__main__":
     style = sys.argv[1] if len(sys.argv) > 1 else "cursive"
