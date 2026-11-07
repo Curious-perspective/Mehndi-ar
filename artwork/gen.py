@@ -527,6 +527,229 @@ def names_hand(cx, cy, style):
     s += "".join(dot((cx - 48 - k * 8, cy + 8), 2.6 - k * 0.6) for k in range(3))
     return s
 
+# ---------- PALM v3: one connected composition; regions divided by thick outlines and filled with simple patterns ----------
+THICK = 5.0
+_cid = [0]
+def cid(p="c"):
+    _cid[0] += 1; return f"{p}{_cid[0]}"
+
+def clip_to(shape_d, content, transform=""):
+    i = cid()
+    return f'<clipPath id="{i}"><path d="{shape_d}" {transform}/></clipPath><g clip-path="url(#{i})">{content}</g>'
+
+def rect_d(x, y, w, h): return f"M{f(x)},{f(y)} h{f(w)} v{f(h)} h{f(-w)} Z"
+
+# simple fills over a box (x0,y0,x1,y1)
+def pat_crosshatch(x0, y0, x1, y1, step=11, w=1.1):
+    s = ""; n = int((x1 - x0 + y1 - y0) / step) + 2
+    for k in range(-n, n):
+        a = x0 + k * step
+        s += line((a, y0), (a + (y1 - y0), y1), w, INK2) + line((a + (y1 - y0), y0), (a, y1), w, INK2)
+    return s
+def pat_hatch(x0, y0, x1, y1, step=8, w=1.1):
+    s = ""; n = int((x1 - x0 + y1 - y0) / step) + 2
+    for k in range(-n, n):
+        a = x0 + k * step
+        s += line((a, y0), (a + (y1 - y0), y1), w, INK2)
+    return s
+def pat_dots(x0, y0, x1, y1, step=11, r=1.7):
+    s = ""; y = y0; row = 0
+    while y <= y1:
+        x = x0 + (step / 2 if row % 2 else 0)
+        while x <= x1: s += dot((x, y), r, INK2); x += step
+        y += step * 0.87; row += 1
+    return s
+def pat_scales(x0, y0, x1, y1, r=13, w=1.4):
+    s = ""; y = y0; row = 0
+    while y <= y1 + r:
+        x = x0 + (r if row % 2 else 0)
+        while x <= x1 + r:
+            s += f'<path d="M{f(x - r)},{f(y)} A{f(r)},{f(r)} 0 0 0 {f(x + r)},{f(y)}" fill="none" stroke="{INK2}" stroke-width="{w}"/>'
+            s += dot((x, y + r * 0.45), 1.6, INK2)
+            x += 2 * r
+        y += r * 0.9; row += 1
+    return s
+def pat_lattice_flowers(x0, y0, x1, y1, cell=26):
+    s = pat_crosshatch(x0, y0, x1, y1, cell / 2 ** 0.5 * 1.0, 1.5)
+    y = y0; row = 0
+    while y <= y1:
+        x = x0 + (cell / 2 if row % 2 else 0)
+        while x <= x1: s += g(four_petal_star(5), x, y); x += cell
+        y += cell / 2; row += 1
+    return s
+
+def knock(c0, r):  # clean skin under a main motif so it stands out from the fills
+    return f'<circle cx="{f(c0[0])}" cy="{f(c0[1])}" r="{f(r)}" fill="{SKIN}"/>'
+
+def finger_column(fi):
+    """whole finger covered: cap | band | pattern block with motif | band | motif block | base band"""
+    p1, p2, p3, p4 = [P(k) for k in FINGERS[fi]]
+    wd = FW[fi]; s = ""
+    def seg(a, b, body_fn):
+        c = lerp(a, b, 0.5); rot = ang(a, b) + 90; Ls = dist(a, b)
+        x0, y0 = -wd, -Ls / 2
+        body = body_fn(wd, Ls)
+        return g(clip_to(rect_d(x0, y0, 2 * wd, Ls), body), c[0], c[1], rot)
+    def thick_across(pt, a, b, w=THICK):
+        rot = ang(a, b) + 90
+        return g(line((-wd, 0), (wd, 0), w) + line((-wd, 7), (wd, 7), 1.6), pt[0], pt[1], rot)
+    # distal: solid cap (tip end) over a thin band
+    a = lerp(p3, p4, 0.38)
+    tipdir = ((p4[0] - p3[0]) / dist(p3, p4), (p4[1] - p3[1]) / dist(p3, p4))
+    s += line(a, (p4[0] + tipdir[0] * wd * 0.1, p4[1] + tipdir[1] * wd * 0.1), wd * 1.02, FILL)
+    s += seg(p3, lerp(p3, p4, 0.38), lambda w_, L_: pat_dots(-w_, -L_ / 2, w_, L_ / 2, 8, 1.5))
+    s += thick_across(lerp(p3, p4, 0.36), p4, p3, 3.4)
+    if fi == 0:
+        # thumb: lattice with tiny flowers on the proximal phalanx
+        s += seg(p2, p3, lambda w_, L_: pat_lattice_flowers(-w_, -L_ / 2, w_, L_ / 2, 24))
+        s += thick_across(p3, p4, p2) + thick_across(p2, p3, p1)
+        return s
+    # middle phalanx: cross-hatch fill, mini flower on clean skin in the middle
+    def mid(w_, L_):
+        b = pat_crosshatch(-w_, -L_ / 2, w_, L_ / 2, 10, 1.0)
+        b += knock((0, 0), wd * 0.36) + circ((0, 0), wd * 0.36, 2.4) + mini_flower(wd * 0.3)
+        return b
+    s += seg(p2, p3, mid)
+    s += thick_across(p3, p4, p2)
+    # proximal phalanx: scales fill, spiral medallion on clean skin
+    def prox(w_, L_):
+        b = pat_scales(-w_, -L_ / 2, w_, L_ / 2, 9, 1.2)
+        b += knock((0, -L_ * 0.05), wd * 0.38) + circ((0, -L_ * 0.05), wd * 0.38, 2.4)
+        b += g(spiral(wd * 0.26, 2.6, 2) + dot_ring(wd * 0.31, 12, 1.8), 0, -L_ * 0.05)
+        return b
+    s += seg(p1, p2, prox)
+    s += thick_across(p2, p3, p1)
+    return s
+
+def palm_art():
+    out = []
+    pd = palm_path()
+    cx, cy = 552, 985; R = 172                     # medallion outer radius (thick ring)
+    BIG = 900
+    def wedge(a0, a1):
+        pts = [(cx, cy)] + [(cx + BIG * math.cos(math.radians(a0 + (a1 - a0) * k / 12)), cy + BIG * math.sin(math.radians(a0 + (a1 - a0) * k / 12))) for k in range(13)]
+        return "M" + " L".join(f"{f(x)},{f(y)}" for x, y in pts) + " Z"
+    box = (330, 700, 790, 1220)
+    # regions around the medallion: angle ranges (SVG: 0 = right, -90 = up)
+    regions = [
+        (-150, -32, pat_scales(*box, 14, 1.4)),                 # under the knuckles
+        (-32, 72, pat_dots(*box, 10, 2.3)),                     # pinky-side edge
+        (72, 112, pat_hatch(*box, 7, 1.2)),                     # heel → wrist (rays region)
+        (112, 210, pat_lattice_flowers(*box, 28)),              # thumb mound
+    ]
+    fills = ""
+    for a0, a1, pat in regions:
+        fills += clip_to(wedge(a0, a1), pat)
+    out.append(clip_to(pd, fills))
+    # thick dividers: palm-edge outline is implied by the hand; spokes from the medallion ring to the edge
+    spokes = ""
+    for a in (-150, -32, 72, 112):
+        r0 = R; r1 = 420
+        spokes += line((cx + r0 * math.cos(math.radians(a)), cy + r0 * math.sin(math.radians(a))), (cx + r1 * math.cos(math.radians(a)), cy + r1 * math.sin(math.radians(a))), THICK)
+    # knuckle line: thick curve across the finger bases, with half flowers hanging from it on clean skin
+    knuckle = "M352,800 C420,772 470,766 500,766 C560,766 640,774 760,826"
+    spokes += f'<path d="{knuckle}" fill="none" stroke="{INK}" stroke-width="{THICK}"/>'
+    out.append(clip_to(pd, spokes))
+    # clean skin above the knuckle line (between the line and finger bases) with a dot row
+    out.append(clip_to(pd, f'<path d="M330,700 L790,700 L790,826 C640,774 560,766 500,766 C470,766 420,772 330,808 Z" fill="{SKIN}"/>'))
+    for x, y in [(418, 768), (500, 760), (584, 764), (664, 782)]:
+        out.append(dot((x, y - 6), 4.2))
+    for (x, y, r) in [(420, 792, 32), (502, 786, 34), (586, 792, 32), (664, 814, 28)]:
+        hf = clip_to(rect_d(-r - 6, 0, 2 * r + 12, r + 8), knock((0, 0), r + 5))
+        hf += f'<path d="M{-r},0 A{r},{r} 0 0 0 {r},0" fill="none" stroke="{INK}" stroke-width="2.6"/>'
+        hf += petal_ring(r * 0.32, r * 0.92, 7, 0.6, 1.5)
+        hf = clip_to(rect_d(-r - 4, 0, 2 * r + 8, r + 6), hf)
+        hf += dot((0, 2), r * 0.18)
+        out.append(g(hf, x, y))
+    # pinky-side leaf vine sits on the dotted region (on its own clean stripe)
+    vine_d = "M752,880 C762,960 752,1040 716,1120"
+    vine = f'<path d="{vine_d}" fill="none" stroke="{SKIN}" stroke-width="30" stroke-linecap="round"/>'
+    vine += f'<path d="{vine_d}" fill="none" stroke="{INK}" stroke-width="3.4"/>'
+    def bez(t, p=((752, 880), (762, 960), (752, 1040), (716, 1120))):
+        return tuple((1 - t) ** 3 * p[0][i] + 3 * (1 - t) ** 2 * t * p[1][i] + 3 * (1 - t) * t * t * p[2][i] + t ** 3 * p[3][i] for i in range(2))
+    for k, t in enumerate([0.1, 0.26, 0.42, 0.58, 0.74, 0.9]):
+        q = bez(t); q2 = bez(t + 0.01); a_ = ang(q, q2); side = 1 if k % 2 else -1
+        vine += g(teardrop(20, 7, fill=FILL if k % 2 else "none", stroke=INK, w=1.5), q[0], q[1], a_ + 90 + side * 50)
+    out.append(clip_to(pd, vine))
+    # medallion: clean skin disc with a thick outer ring
+    med = knock((0, 0), R)
+    med += round_petal_ring(118, 160, 14, 2.6)
+    for i in range(14):
+        med += f'<g transform="rotate({i * 360 / 14 + 180 / 14})">' + g(teardrop(30, 7), 0, -120) + "</g>"
+    med += scallop_ring(110, 24, 8, 2.2)
+    med += f'<circle r="102" fill="none" stroke="{FILL}" stroke-width="6"/>'
+    med += dot_ring(94, 40, 2.0)
+    med += circ((0, 0), 88, 1.8)
+    med += dot_ring(166, 36, 2.4, rot=5)
+    med += f'<circle r="{R}" fill="none" stroke="{INK}" stroke-width="{THICK}"/>'
+    out.append(g(med, cx, cy))
+    out.append(("NAMES", cx, cy - 2))
+    # heel rays: a half-sun hugging the bottom of the medallion, joining it to the cuff
+    out.append(clip_to(pd, g(f'<path d="M-60,0 A60,60 0 0 1 60,0 Z" fill="{SKIN}"/>' + petal_ring(22, 56, 9, 0.6, 1.6, fill_alt=True) + f'<path d="M-60,0 A60,60 0 0 1 60,0" fill="none" stroke="{INK}" stroke-width="3"/>', 552, 1196, 0)))
+    # fingers, fully covered
+    for fi in range(5):
+        out.append(finger_column(fi))
+    # cuff + forearm
+    out.append(cuff3(1196))
+    return out
+
+def cuff3(y0):
+    xl, xr = 380, 660
+    s = ""; y = y0
+    def hl(y, w=THICK): return line((xl, y), (xr, y), w)
+    def bandfill(ya, yb, pat):
+        return clip_to(rect_d(xl, ya, xr - xl, yb - ya), pat)
+    # band 1: dots row on hatch
+    yb = y + 26
+    s += bandfill(y, yb, pat_hatch(xl, y, xr, yb, 7, 1.1)) + f'<rect x="{xl}" y="{y + 6}" width="{xr - xl}" height="14" fill="{SKIN}"/>'
+    for k in range(15): s += dot((xl + 10 + k * (xr - xl - 20) / 14, y + 13), 4)
+    s += hl(y); y = yb; s += hl(y)
+    # band 2: leaf chain on clean skin
+    yb = y + 34
+    n = 13
+    for k in range(n):
+        x = xl + 12 + k * (xr - xl - 24) / (n - 1)
+        s += g(teardrop(16, 6, fill=FILL), x, y + 17, -60) + g(teardrop(16, 6, fill="none", stroke=INK, w=1.4), x, y + 17, 60)
+    s += line((xl, y + 17), (xr, y + 17), 1.4)
+    y = yb; s += hl(y)
+    # band 3: lattice with flowers
+    yb = y + 56
+    s += bandfill(y, yb, pat_lattice_flowers(xl, y, xr, yb, 28)); y = yb; s += hl(y)
+    # band 4: scallops on dots
+    yb = y + 30
+    s += bandfill(y, yb, pat_dots(xl, y, xr, yb, 9, 1.5))
+    n = 12
+    for k in range(n):
+        x0 = xl + k * (xr - xl) / n; x1 = xl + (k + 1) * (xr - xl) / n
+        s += f'<path d="M{f(x0)},{f(y)} Q{f((x0 + x1) / 2)},{f(y + 46)} {f(x1)},{f(y)} Z" fill="{SKIN}" stroke="{INK}" stroke-width="2.2"/>'
+        s += dot(((x0 + x1) / 2, y + 11), 3)
+    y = yb; s += hl(y)
+    # band 5: diamond-petal band
+    yb = y + 48
+    s += bandfill(y, yb, pat_crosshatch(xl, y, xr, yb, 9, 1.0))
+    for k in range(7):
+        x = xl + 20 + k * (xr - xl - 40) / 6
+        s += knock((x, (y + yb) / 2), 19) + g(four_petal_star(17), x, (y + yb) / 2)
+    y = yb; s += hl(y)
+    # forearm half-sun hanging from the last band (connected)
+    s += g(half_sun3(104), 520, y, 180)
+    s += g(teardrop(24, 9), 520, y + 128, 180) + dot((520, y + 164), 6)
+    return s
+
+def half_sun3(r):
+    i = cid()
+    s = f'<clipPath id="{i}"><rect x="{-r - 40}" y="{-r - 40}" width="{2 * r + 80}" height="{r + 40}"/></clipPath><g clip-path="url(#{i})">'
+    s += f'<circle r="{r}" fill="{SKIN}"/>'
+    s += clip_to(f"M{-r},0 A{r},{r} 0 0 1 {r},0 L{r * 0.62},0 A{r * 0.62},{r * 0.62} 0 0 0 {-r * 0.62},0 Z", pat_hatch(-r, -r, r, 0, 6, 1.1))
+    s += round_petal_ring(r * 0.62, r * 0.98, 16, 2.2)
+    s += f'<circle r="{f(r * 0.6)}" fill="{SKIN}" stroke="{FILL}" stroke-width="5"/>'
+    s += petal_ring(r * 0.2, r * 0.56, 10, 0.6, 1.6, hatch=True)
+    s += dot_ring(r * 1.07, 30, 2.4)
+    s += f'<circle r="{r}" fill="none" stroke="{INK}" stroke-width="{THICK}"/>'
+    s += "</g>"
+    s += f'<path d="M{-r * 0.18},0 A{r * 0.18},{r * 0.18} 0 0 1 {r * 0.18},0 Z" fill="{FILL}"/>'
+    return s
+
 if __name__ == "__main__":
     style = sys.argv[1] if len(sys.argv) > 1 else "cursive"
     build("palm", style, f"palm_{style}.svg")
