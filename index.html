@@ -53,12 +53,14 @@
 
 <div id="bottom">
   <div class="row" id="styles">
-    <button data-style="mandala" class="on">Mandala</button>
+    <button data-style="bridal" class="on">Bridal</button>
+    <button data-style="mandala">Mandala</button>
     <button data-style="arabic">Arabic vine</button>
     <button data-style="minimal">Minimal</button>
   </div>
   <div class="row">
     <button id="shade">Shade: fresh</button>
+    <button id="side">Side: auto</button>
     <button id="flip">Flip camera</button>
     <button id="snap" class="primary">Snap</button>
   </div>
@@ -82,7 +84,8 @@
   const video = $('video'), photo = $('photo'), canvas = $('overlay'), ctx = canvas.getContext('2d');
   const statusEl = $('status'), toastEl = $('toast');
 
-  let styleName = 'mandala';
+  let styleName = 'bridal';
+  let sideMode = 'auto';         // auto | palm | back
   let shade = 'fresh';            // fresh | dark
   let facing = 'user';
   let stream = null;
@@ -91,6 +94,8 @@
   let smooth = [];                // smoothed landmarks per hand
   let lastSeen = 0;
   let busy = false;
+  let FW = [0, 0, 0, 0, 0];      // per-finger widths for the hand being drawn
+  let CURLED = [false, false, false, false, false];
   let modelReady = false;
   let photoSrc = null;          // downscaled canvas copy of the chosen photo
   let lastT = 0;
@@ -123,19 +128,30 @@
     }
     // exponential smoothing to kill jitter; each hand matched to its nearest previous wrist (MediaPipe does not keep a stable order)
     const alpha = mode === 'live' ? 0.55 : 1;
-    const out = list.map(lm => {
+    const hd = res.multiHandedness || [];
+    const out = list.map((lm, i) => {
       const wx = lm[0].x * w, wy = lm[0].y * h;
       let prev = null, best = Infinity;
-      for (const sm of smooth) { const d = Math.hypot(sm[0].x - wx, sm[0].y - wy); if (d < best) { best = d; prev = sm; } }
+      for (const sm of smooth) { const d = Math.hypot(sm.pts[0].x - wx, sm.pts[0].y - wy); if (d < best) { best = d; prev = sm; } }
       if (best > 0.15 * Math.max(w, h)) prev = null;
-      return lm.map((p, j) => {
+      const pts = lm.map((p, j) => {
         const x = p.x * w, y = p.y * h;
-        return prev ? { x: prev[j].x + (x - prev[j].x) * alpha, y: prev[j].y + (y - prev[j].y) * alpha } : { x, y };
+        return prev ? { x: prev.pts[j].x + (x - prev.pts[j].x) * alpha, y: prev.pts[j].y + (y - prev.pts[j].y) * alpha } : { x, y };
       });
+      // palm/back: only trust confident handedness, and only switch after N consistent frames (MediaPipe's label flickers)
+      const label = hd[i] ? hd[i].label : null, score = hd[i] ? hd[i].score : 0;
+      const raw = label && score > 0.7 ? isPalmFacing(pts, label) : null;
+      const hand = { pts, palm: prev ? prev.palm : (raw === null ? true : raw), cand: prev ? prev.cand : null, candN: prev ? prev.candN : 0 };
+      const need = mode === 'live' ? 5 : 1;
+      if (raw !== null && raw !== hand.palm) {
+        if (hand.cand === raw) hand.candN++; else { hand.cand = raw; hand.candN = 1; }
+        if (hand.candN >= need) { hand.palm = raw; hand.cand = null; hand.candN = 0; }
+      } else if (raw === hand.palm) { hand.cand = null; hand.candN = 0; }
+      return hand;
     });
-    // hold the last drawing through a single dropped frame
+    // hold the last drawing (landmarks AND side) through a single dropped frame
     smooth = out.length ? out : (performance.now() - lastSeen < 150 ? smooth : []);
-    for (const lm of smooth) drawHand(lm);
+    for (const hand of smooth) drawHand(hand);
   }
 
   // ---------- geometry helpers ----------
@@ -245,7 +261,8 @@
   // landmark indices: 0 wrist; thumb 1-4; index 5-8; middle 9-12; ring 13-16; pinky 17-20
   const FINGERS = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]];
 
-  function drawHand(lm) {
+  function drawHand(hand) {
+    const lm = hand.pts;
     const P = PALETTE[shade];
     const scale = dist(lm[0], lm[9]);                     // wrist → middle MCP
     if (scale < 10) return;
@@ -255,7 +272,61 @@
     const rot = ang(lm[0], lm[9]);
     const palmWidth = dist(lm[5], lm[17]);
     const fingerW = palmWidth * 0.2;
+    // per-finger widths from knuckle spacing (thumb is wider)
+    const s59 = dist(lm[5], lm[9]), s913 = dist(lm[9], lm[13]), s1317 = dist(lm[13], lm[17]);
+    FW = [((s59 + s913 + s1317) / 3) * 1.15, s59 * 0.9, ((s59 + s913) / 2) * 0.9, ((s913 + s1317) / 2) * 0.9, s1317 * 0.85];
+    // curled finger: tip is closer to the wrist than the middle joint → its tip sits over the palm
+    CURLED = FINGERS.map(f => dist(lm[0], lm[f[3]]) < dist(lm[0], lm[f[1]]));
 
+    ctx.save();
+    ctx.clip(handSilhouette(lm, palmWidth, scale));
+    if (styleName === 'bridal') {
+      const palmFacing = sideMode === 'auto' ? hand.palm : sideMode === 'palm';
+      if (palmFacing) drawBridalPalm(lm, scale, palmWidth, fingerW, P, lw);
+      else drawBridalBack(lm, scale, palmWidth, fingerW, P, lw);
+    } else drawClassic(lm, scale, palmWidth, fingerW, palm, rot, P, lw);
+    ctx.restore();
+  }
+
+  // hand + forearm outline as one Path2D (all subpaths same winding so nonzero fill = union)
+  function handSilhouette(lm, palmWidth, scale) {
+    const path = new Path2D();
+    const addPoly = pts => {
+      let a = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; a += p.x * q.y - q.x * p.y; }
+      if (a < 0) pts = pts.slice().reverse();
+      path.moveTo(pts[0].x, pts[0].y); for (let i = 1; i < pts.length; i++) path.lineTo(pts[i].x, pts[i].y); path.closePath();
+    };
+    const circle = (p, r) => { path.moveTo(p.x + r, p.y); path.arc(p.x, p.y, r, 0, Math.PI * 2); path.closePath(); };
+    const u = { x: (lm[9].x - lm[0].x) / scale, y: (lm[9].y - lm[0].y) / scale };   // up the hand
+    const n = { x: -u.y, y: u.x };
+    const off = (p, v, k) => ({ x: p.x + v.x * k, y: p.y + v.y * k });
+    // palm: convex-ish polygon around wrist, thumb base and knuckles, padded outward from the palm centre
+    const c = lerp(lm[0], lm[9], 0.5);
+    const pad = (p, k) => { const d = dist(p, c) || 1; return { x: p.x + (p.x - c.x) / d * k, y: p.y + (p.y - c.y) / d * k }; };
+    const ww = palmWidth * 0.42;
+    // which side of the hand axis the thumb is on, so the heel/thenar bulges go the right way
+    const ts = ((lm[5].x - lm[0].x) * n.x + (lm[5].y - lm[0].y) * n.y) >= 0 ? 1 : -1;
+    const at = (x, y) => off(off(lm[0], u, x * scale), n, y * palmWidth * ts);   // x: scale units up the hand, y: palm widths towards the thumb
+    addPoly([at(0, 0.42), at(0.28, 0.56), pad(lm[1], palmWidth * 0.1), pad(lm[2], palmWidth * 0.08), pad(lm[5], palmWidth * 0.1),
+             pad(lm[9], palmWidth * 0.08), pad(lm[13], palmWidth * 0.08), pad(lm[17], palmWidth * 0.1),
+             at(0.72, -0.6), at(0.38, -0.6), at(0.12, -0.52), at(0, -0.42)]);
+    // forearm: slightly widening strip below the wrist so the cuff stays on the arm
+    const fa = scale * 0.9, fw = palmWidth * 0.46;
+    addPoly([off(lm[0], n, ww), off(lm[0], n, -ww), off(off(lm[0], u, -fa), n, -fw), off(off(lm[0], u, -fa), n, fw)]);
+    // fingers: capsules per segment, radius from that finger's width
+    FINGERS.forEach((f, i) => {
+      const r = FW[i] * 0.55;
+      const chain = [f[0] === 1 ? 1 : f[0], f[1], f[2], f[3]].map(k => lm[k]);
+      for (let k = 0; k < chain.length - 1; k++) {
+        const a = chain[k], b = chain[k + 1], L = dist(a, b) || 1, px = -(b.y - a.y) / L * r, py = (b.x - a.x) / L * r;
+        addPoly([{ x: a.x + px, y: a.y + py }, { x: b.x + px, y: b.y + py }, { x: b.x - px, y: b.y - py }, { x: a.x - px, y: a.y - py }]);
+      }
+      chain.forEach(p => circle(p, r));
+    });
+    return path;
+  }
+
+  function drawClassic(lm, scale, palmWidth, fingerW, palm, rot, P, lw) {
     if (styleName === 'mandala') {
       const R = Math.min(scale * 0.46, palmWidth * 0.5);
       dot(palm.x, palm.y, R * 0.11, P.deep);
@@ -265,13 +336,14 @@
       dotRing(palm.x, palm.y, R * 0.9, 16, rot + Math.PI / 16, lw * 1.1, P.line);
       scallopRing(palm.x, palm.y, R * 0.98, 16, rot, P.line, lw * 0.9);
       // fingers: vines + capped tips
-      for (const f of FINGERS) {
-        const pts = f.map(i => lm[i]);
-        diamondChain(lerp(pts[0], pts[1], 0.12), lerp(pts[0], pts[1], 0.9), fingerW, P.line, lw);
-        vine([pts[1], pts[2]], fingerW, P.line, lw);
-        thickSegment(lerp(pts[2], pts[3], 0.3), pts[3], fingerW * 0.95, P.fill);
-        bandAcross(pts[1], pts[0], pts[2], fingerW, P.line, lw);
-      }
+      FINGERS.forEach((f, fi) => {
+        const pts = f.map(i => lm[i]), fw = FW[fi];
+        diamondChain(lerp(pts[0], pts[1], 0.12), lerp(pts[0], pts[1], 0.9), fw, P.line, lw);
+        if (CURLED[fi]) return;
+        vine([pts[1], pts[2]], fw, P.line, lw);
+        tipCap(pts[2], pts[3], fw, P.fill);
+        bandAcross(pts[1], pts[0], pts[2], fw, P.line, lw);
+      });
       wristBand(lm, scale, palmWidth, P, lw);
     } else if (styleName === 'arabic') {
       // bold diagonal vine from wrist across palm to index tip, paisleys, leaves
@@ -280,15 +352,17 @@
       paisley(lerp(palm, lm[17], 0.35).x, lerp(palm, lm[17], 0.35).y, scale * 0.42, rot + Math.PI * 0.2, P.line, lw);
       paisley(lerp(lm[0], lm[13], 0.35).x, lerp(lm[0], lm[13], 0.35).y, scale * 0.3, rot - Math.PI * 0.6, P.line, lw);
       // middle + ring finger: ring bands and caps; pinky + thumb: lighter
-      for (const f of FINGERS.slice(2, 4)) {
-        const pts = f.map(i => lm[i]);
-        thickSegment(lerp(pts[2], pts[3], 0.3), pts[3], fingerW * 0.95, P.fill);
-        bandAcross(pts[1], pts[0], pts[2], fingerW, P.line, lw);
+      for (const fi of [2, 3]) {
+        if (CURLED[fi]) continue;
+        const pts = FINGERS[fi].map(i => lm[i]);
+        tipCap(pts[2], pts[3], FW[fi], P.fill);
+        bandAcross(pts[1], pts[0], pts[2], FW[fi], P.line, lw);
       }
-      for (const f of [FINGERS[0], FINGERS[4]]) {
-        const pts = f.map(i => lm[i]);
-        thickSegment(lerp(pts[2], pts[3], 0.45), pts[3], fingerW * 0.9, P.fill);
-        dotRing(pts[1].x, pts[1].y, fingerW * 0.4, 4, 0, lw * 1.1, P.line);
+      for (const fi of [0, 4]) {
+        if (CURLED[fi]) continue;
+        const pts = FINGERS[fi].map(i => lm[i]);
+        tipCap(pts[2], pts[3], FW[fi], P.fill);
+        dotRing(pts[1].x, pts[1].y, FW[fi] * 0.4, 4, 0, lw * 1.1, P.line);
       }
       wristBand(lm, scale, palmWidth, P, lw, true);
     } else { // minimal
@@ -296,15 +370,249 @@
       dot(palm.x, palm.y, R * 0.16, P.deep);
       ctx.strokeStyle = P.line; ctx.lineWidth = lw; ctx.beginPath(); ctx.arc(palm.x, palm.y, R * 0.5, 0, Math.PI * 2); ctx.stroke();
       dotRing(palm.x, palm.y, R * 0.8, 12, rot, lw * 1.1, P.line);
-      for (const f of FINGERS) {
+      FINGERS.forEach((f, fi) => {
+        if (CURLED[fi]) return;
         const pts = f.map(i => lm[i]);
-        thickSegment(lerp(pts[2], pts[3], 0.5), pts[3], fingerW * 0.9, P.fill);
+        tipCap(pts[2], pts[3], FW[fi], P.fill);
         dot(pts[1].x, pts[1].y, lw * 1.6, P.line);
-      }
+      });
       // thin wrist line with dots
       const w0 = lm[0], d = { x: -Math.sin(rot), y: Math.cos(rot) };
       thickSegment({ x: w0.x - d.x * palmWidth * 0.55, y: w0.y - d.y * palmWidth * 0.55 }, { x: w0.x + d.x * palmWidth * 0.55, y: w0.y + d.y * palmWidth * 0.55 }, lw, P.line);
     }
+  }
+
+  // ---------- palm / back detection ----------
+  // MediaPipe labels handedness as if the frame were mirrored; we send raw (un-mirrored) frames, so the label is
+  // swapped. A true right hand shows its palm when the wrist→index×wrist→pinky cross product is < 0 (y-down);
+  // with the swapped label that is: palm iff (Left and cross < 0) or (Right and cross > 0). Rotation-invariant.
+  function isPalmFacing(lm, label) {
+    const w = lm[0], a = lm[5], b = lm[17];
+    const cross = (a.x - w.x) * (b.y - w.y) - (a.y - w.y) * (b.x - w.x);
+    if (!label) return true;
+    return (label === 'Right') === (cross > 0);
+  }
+
+  // Solid fingertip cap that stops just short of the fingertip (the round cap adds the rest)
+  function tipCap(dip, tip, fingerW, color) {
+    const L = dist(dip, tip); if (L < 2) return;
+    const d = { x: (tip.x - dip.x) / L, y: (tip.y - dip.y) / L };
+    const w = fingerW * 0.92;
+    const a = lerp(dip, tip, 0.28);
+    const b = { x: tip.x - d.x * w * 0.42, y: tip.y - d.y * w * 0.42 };
+    thickSegment(a, b, w, color);
+  }
+
+  // ladder band across a finger segment: n cross lines, dots between
+  function ladder(a, b, fingerW, color, lw, n = 3) {
+    const th = ang(a, b), d = { x: -Math.sin(th), y: Math.cos(th) }, half = fingerW * 0.46;
+    for (let k = 0; k < n; k++) {
+      const p = lerp(a, b, (k + 1) / (n + 1));
+      thickSegment({ x: p.x - d.x * half, y: p.y - d.y * half }, { x: p.x + d.x * half, y: p.y + d.y * half }, lw, color);
+      if (k < n - 1) { const q = lerp(a, b, (k + 1.5) / (n + 1)); dot(q.x - d.x * half * 0.45, q.y - d.y * half * 0.45, lw * 1.1, color); dot(q.x + d.x * half * 0.45, q.y + d.y * half * 0.45, lw * 1.1, color); }
+    }
+  }
+
+  // dense finger: cap + ladder on the middle phalanx + motif on the proximal phalanx
+  function denseFinger(lm, f, i, fingerW, P, lw, curled) {
+    const pts = f.map(k => lm[k]);
+    if (!curled) {
+      tipCap(pts[2], pts[3], fingerW, P.fill);
+      ladder(pts[1], pts[2], fingerW, P.line, lw, 3);
+    }
+    const a = lerp(pts[0], pts[1], 0.15), b = lerp(pts[0], pts[1], 0.92);
+    if (i % 2 === 0) diamondChain(a, b, fingerW, P.line, lw);
+    else vine([a, b], fingerW, P.line, lw);
+    bandAcross(pts[1], pts[0], pts[2], fingerW * 1.05, P.line, lw);
+  }
+
+  // hand-local frame: origin wrist, +x up the hand (towards middle MCP), unit = scale; +y towards the thumb side
+  function withHandFrame(lm, scale, fn) {
+    const rot = ang(lm[0], lm[9]);
+    const u = { x: Math.cos(rot), y: Math.sin(rot) };
+    const vR = { x: -u.y, y: u.x };
+    const sgn = ((lm[5].x - lm[0].x) * vR.x + (lm[5].y - lm[0].y) * vR.y) >= 0 ? 1 : -1;
+    ctx.save();
+    ctx.translate(lm[0].x, lm[0].y);
+    ctx.transform(u.x * scale, u.y * scale, vR.x * scale * sgn, vR.y * scale * sgn, 0, 0);
+    fn();
+    ctx.restore();
+  }
+
+  // half-sun motif in the local frame: centre (cx,cy), radius r, facing +x (dirSign 1) or -x (-1)
+  function halfSun(cx, cy, r, dirSign, P, lw) {
+    const a0 = dirSign > 0 ? -Math.PI / 2 : Math.PI / 2, a1 = a0 + Math.PI;
+    const ring = (rr, w) => { ctx.strokeStyle = P.line; ctx.lineWidth = w; ctx.beginPath(); ctx.arc(cx, cy, rr, a0, a1); ctx.stroke(); };
+    ctx.fillStyle = P.deep; ctx.beginPath(); ctx.arc(cx, cy, r * 0.16, a0, a1); ctx.closePath(); ctx.fill();
+    ring(r * 0.24, lw);
+    ctx.fillStyle = P.fill;
+    const nT = 11;
+    for (let k = 0; k < nT; k++) {
+      const t0 = a0 + (k / nT) * Math.PI, t1 = a0 + ((k + 1) / nT) * Math.PI, tm = (t0 + t1) / 2;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(t0) * r * 0.28, cy + Math.sin(t0) * r * 0.28);
+      ctx.lineTo(cx + Math.cos(tm) * r * 0.46, cy + Math.sin(tm) * r * 0.46);
+      ctx.lineTo(cx + Math.cos(t1) * r * 0.28, cy + Math.sin(t1) * r * 0.28);
+      ctx.closePath(); ctx.fill();
+    }
+    ring(r * 0.5, lw * 1.6);
+    const nP = 13;
+    for (let k = 0; k < nP; k++) {
+      const t = a0 + ((k + 0.5) / nP) * Math.PI, px = -Math.sin(t), py = Math.cos(t);
+      const s = { x: cx + Math.cos(t) * r * 0.55, y: cy + Math.sin(t) * r * 0.55 };
+      const e = { x: cx + Math.cos(t) * r * 0.82, y: cy + Math.sin(t) * r * 0.82 };
+      const bw = r * 0.09;
+      ctx.beginPath(); ctx.moveTo(s.x, s.y);
+      ctx.quadraticCurveTo((s.x + e.x) / 2 + px * bw, (s.y + e.y) / 2 + py * bw, e.x, e.y);
+      ctx.quadraticCurveTo((s.x + e.x) / 2 - px * bw, (s.y + e.y) / 2 - py * bw, s.x, s.y);
+      ctx.strokeStyle = P.line; ctx.lineWidth = lw; ctx.stroke();
+      if (k % 2 === 0) { ctx.fillStyle = P.fill; ctx.fill(); }
+    }
+    ring(r * 0.86, lw);
+    const nD = 17;
+    for (let k = 0; k < nD; k++) { const t = a0 + ((k + 0.5) / nD) * Math.PI; dot(cx + Math.cos(t) * r * 0.95, cy + Math.sin(t) * r * 0.95, lw * 1.25, P.line); }
+  }
+
+  // layered wrist cuff in the local frame (wrist at x=0, forearm towards -x). half = half-width in scale units
+  function cuff(half, P, lw, bands) {
+    const line = (x, w) => thickSegment({ x, y: -half }, { x, y: half }, w, P.line);
+    let x = -0.03;
+    for (const b of bands) {
+      if (b === 'thick') { line(x, lw * 2.4); x -= 0.05; }
+      else if (b === 'thin') { line(x, lw); x -= 0.035; }
+      else if (b === 'dots') { const n = 9; for (let k = 0; k < n; k++) dot(x, -half + (k + 0.5) / n * half * 2, lw * 1.3, P.line); x -= 0.05; }
+      else if (b === 'scallop') {
+        const n = 7; ctx.strokeStyle = P.line; ctx.lineWidth = lw; ctx.beginPath();
+        for (let k = 0; k < n; k++) { const y0 = -half + k / n * half * 2, y1 = -half + (k + 1) / n * half * 2; if (k === 0) ctx.moveTo(x, y0); ctx.quadraticCurveTo(x - 0.05, (y0 + y1) / 2, x, y1); }
+        ctx.stroke(); x -= 0.07;
+      }
+      else if (b === 'teeth') {
+        const n = 9; ctx.fillStyle = P.fill;
+        for (let k = 0; k < n; k++) { const y0 = -half + k / n * half * 2, y1 = -half + (k + 1) / n * half * 2; ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x - 0.05, (y0 + y1) / 2); ctx.lineTo(x, y1); ctx.closePath(); ctx.fill(); }
+        x -= 0.06;
+      }
+    }
+    return x;
+  }
+
+  // ---------- mehndi lettering: hand-drawn stroke glyphs on a 4 x 6 grid ----------
+  const GLYPHS = {
+    A: [[[0,6],[2,0],[4,6]], [[0.9,3.6],[3.1,3.6]]],
+    K: [[[0,0],[0,6]], [[4,0],[0,3.4]], [[1.3,2.5],[4,6]]],
+    S: [[[4,1],[3,0],[1,0],[0,1],[0,2.2],[1,3],[3,3],[4,3.8],[4,5],[3,6],[1,6],[0,5]]],
+    H: [[[0,0],[0,6]], [[4,0],[4,6]], [[0,3],[4,3]]],
+    Y: [[[0,0],[2,3]], [[4,0],[2,3],[2,6]]],
+    W: [[[0,0],[0.8,6],[2,2.2],[3.2,6],[4,0]]],
+    E: [[[4,0],[0,0],[0,6],[4,6]], [[0,3],[3,3]]],
+    D: [[[0,0],[0,6],[2,6],[3.4,5],[4,3],[3.4,1],[2,0],[0,0]]],
+    R: [[[0,6],[0,0],[3,0],[4,1],[4,2],[3,3],[0,3]], [[1.6,3],[4,6]]],
+    ' ': []
+  };
+
+  // draws text centred at (cx,cy) in image space. up = unit vector pointing up the hand; mirror flips glyphs
+  // so the text reads correctly on a mirrored (selfie) display. h = letter height in px.
+  function mehndiText(str, cx, cy, up, h, mirror, color, lw) {
+    const right = { x: -up.y, y: up.x };            // screen-right when the hand points up
+    const dirX = mirror ? { x: -right.x, y: -right.y } : right;
+    const gw = h * 0.62, gap = h * 0.22;
+    const total = str.length * gw + (str.length - 1) * gap;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.transform(dirX.x, dirX.y, -up.x, -up.y, 0, 0);  // local x → along the text, local y → down the hand
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = lw;
+    let x = -total / 2;
+    const gx2 = gx => (mirror ? (4 - gx) : gx) / 4 * gw;
+    for (const ch of str) {
+      const g = GLYPHS[ch] || [];
+      for (const stroke of g) {
+        ctx.beginPath();
+        stroke.forEach(([gx, gy], i) => { const px = x + gx2(gx), py = (gy / 6 - 0.5) * h; i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+        ctx.stroke();
+        for (const [gx, gy] of [stroke[0], stroke[stroke.length - 1]]) dot(x + gx2(gx), (gy / 6 - 0.5) * h, lw * 0.75, color);
+      }
+      x += gw + gap;
+    }
+    ctx.restore();
+  }
+
+  // ---------- BRIDAL: palm side ----------
+  function drawBridalPalm(lm, scale, palmWidth, fingerW, P, lw) {
+    FINGERS.forEach((f, i) => denseFinger(lm, f, i, FW[i], P, lw, CURLED[i]));
+    const W = palmWidth / scale;                        // palm width in scale units (~0.8)
+    const mirror = mode === 'live' && facing === 'user';
+    const rot = ang(lm[0], lm[9]), up = { x: Math.cos(rot), y: Math.sin(rot) };
+
+    const l = lw / scale;
+    withHandFrame(lm, scale, () => {
+      // scalloped row just under the knuckles
+      ctx.strokeStyle = P.line; ctx.lineWidth = l; ctx.beginPath();
+      const n = 6, y0 = -W * 0.5, y1 = W * 0.5, xs = 0.86;
+      for (let k = 0; k < n; k++) { const a = y0 + k / n * (y1 - y0), b = y0 + (k + 1) / n * (y1 - y0); if (!k) ctx.moveTo(xs, a); ctx.quadraticCurveTo(xs - 0.07, (a + b) / 2, xs, b); }
+      ctx.stroke();
+      for (let k = 0; k <= n; k++) dot(xs + 0.03, y0 + k / n * (y1 - y0), l * 1.2, P.line);
+      // thenar lattice on the thumb side, beside the frame (the hand clip trims it to the skin)
+      ctx.save();
+      ctx.beginPath(); ctx.moveTo(0.2, W * 0.44); ctx.lineTo(0.84, W * 0.44); ctx.lineTo(0.84, W * 0.75); ctx.lineTo(0.2, W * 0.75); ctx.closePath(); ctx.clip();
+      for (let x = 0.2; x <= 0.86; x += 0.07) thickSegment({ x, y: W * 0.42 }, { x, y: W * 0.8 }, l * 0.8, P.line);
+      for (let y = W * 0.44; y <= W * 0.8; y += 0.07) thickSegment({ x: 0.18, y }, { x: 0.86, y }, l * 0.8, P.line);
+      ctx.restore();
+      // name frame: double rectangle with corner dots
+      const fx0 = 0.4, fx1 = 0.82, fy = W * 0.4;
+      ctx.strokeStyle = P.line; ctx.lineWidth = l;
+      ctx.strokeRect(fx0, -fy, fx1 - fx0, fy * 2);
+      ctx.lineWidth = l * 0.7; ctx.strokeRect(fx0 + 0.022, -fy + 0.022, fx1 - fx0 - 0.044, fy * 2 - 0.044);
+      for (const x of [fx0, fx1]) for (const y of [-fy, fy]) dot(x, y, l * 1.6, P.deep);
+      // half-sun at the palm base, facing the fingers (stops short of the frame)
+      halfSun(0.02, 0, Math.min(0.34, W * 0.42), 1, P, l);
+      // wrist cuff + trailing half-sun on the forearm
+      const endX = cuff(W * 0.62, P, l, ['thick', 'dots', 'scallop', 'thin', 'teeth', 'thick']);
+      halfSun(endX - 0.04, 0, W * 0.36, -1, P, l);
+      dot(endX - 0.04 - W * 0.36 - 0.06, 0, l * 1.8, P.deep);
+    });
+
+    // names inside the frame, screen-oriented so they read correctly; sized to fit the frame width
+    const at = t => ({ x: lm[0].x + up.x * scale * t, y: lm[0].y + up.y * scale * t });
+    const h = Math.min(0.1, (W * 0.8 * 0.86) / 4.82) * scale;   // 6 letters ≈ 4.82 letter-heights wide
+    const c1 = at(0.745), c2 = at(0.61), c3 = at(0.475);
+    mehndiText('AKSHAY', c1.x, c1.y, up, h, mirror, P.deep, Math.max(1, h * 0.12));
+    mehndiText('WEDS', c2.x, c2.y, up, h * 0.62, mirror, P.line, Math.max(1, h * 0.09));
+    mehndiText('SHREYA', c3.x, c3.y, up, h, mirror, P.deep, Math.max(1, h * 0.12));
+  }
+
+  // ---------- BRIDAL: back of the hand ----------
+  function drawBridalBack(lm, scale, palmWidth, fingerW, P, lw) {
+    FINGERS.forEach((f, i) => denseFinger(lm, f, i + 1, FW[i], P, lw, CURLED[i]));
+    const W = palmWidth / scale;
+    const l = lw / scale;
+    withHandFrame(lm, scale, () => {
+      // central flower
+      const cx = 0.52, cy = 0, R = W * 0.42;
+      dot(cx, cy, R * 0.1, P.deep);
+      ctx.strokeStyle = P.line; ctx.lineWidth = l; ctx.beginPath(); ctx.arc(cx, cy, R * 0.2, 0, Math.PI * 2); ctx.stroke();
+      const nP = 8;
+      for (let k = 0; k < nP; k++) {
+        const t = (k / nP) * Math.PI * 2, px = -Math.sin(t), py = Math.cos(t);
+        const s = { x: cx + Math.cos(t) * R * 0.24, y: cy + Math.sin(t) * R * 0.24 }, e = { x: cx + Math.cos(t) * R * 0.66, y: cy + Math.sin(t) * R * 0.66 };
+        const bw = R * 0.16;
+        ctx.beginPath(); ctx.moveTo(s.x, s.y);
+        ctx.quadraticCurveTo((s.x + e.x) / 2 + px * bw, (s.y + e.y) / 2 + py * bw, e.x, e.y);
+        ctx.quadraticCurveTo((s.x + e.x) / 2 - px * bw, (s.y + e.y) / 2 - py * bw, s.x, s.y);
+        ctx.strokeStyle = P.line; ctx.lineWidth = l; ctx.stroke();
+        if (k % 2) { ctx.fillStyle = P.fill; ctx.fill(); } else dot((s.x + e.x) / 2, (s.y + e.y) / 2, l * 1.3, P.line);
+      }
+      ctx.beginPath(); ctx.arc(cx, cy, R * 0.72, 0, Math.PI * 2); ctx.lineWidth = l * 1.6; ctx.stroke();
+      for (let k = 0; k < 20; k++) { const t = (k / 20) * Math.PI * 2; dot(cx + Math.cos(t) * R * 0.84, cy + Math.sin(t) * R * 0.84, l * 1.2, P.line); }
+      ctx.lineWidth = l; ctx.beginPath();
+      for (let k = 0; k < 16; k++) { const t0 = (k / 16) * Math.PI * 2, t1 = ((k + 1) / 16) * Math.PI * 2, tm = (t0 + t1) / 2; if (!k) ctx.moveTo(cx + Math.cos(t0) * R * 0.92, cy + Math.sin(t0) * R * 0.92); ctx.quadraticCurveTo(cx + Math.cos(tm) * R * 1.08, cy + Math.sin(tm) * R * 1.08, cx + Math.cos(t1) * R * 0.92, cy + Math.sin(t1) * R * 0.92); }
+      ctx.stroke();
+      // bel (vines) hugging both edges of the hand from the cuff up to the knuckles
+      for (const sgn of [1, -1]) {
+        const path = [{ x: 0.02, y: sgn * W * 0.5 }, { x: 0.3, y: sgn * W * 0.56 }, { x: 0.62, y: sgn * W * 0.52 }, { x: 0.9, y: sgn * W * 0.42 }];
+        vine(path, W * 0.16, P.line, l);
+      }
+      cuff(W * 0.6, P, l, ['thin', 'scallop', 'thick']);
+    });
+    for (const i of [5, 9, 13, 17]) dot(lm[i].x, lm[i].y, lw * 1.8, P.deep);
   }
 
   function bandAcross(center, from, to, width, color, lw) {
@@ -404,6 +712,11 @@
     const b = e.target.closest('button[data-style]'); if (!b) return;
     styleName = b.dataset.style;
     [...$('styles').children].forEach(x => x.classList.toggle('on', x === b));
+    if (mode === 'photo') rerenderPhoto();
+  });
+  $('side').addEventListener('click', () => {
+    sideMode = sideMode === 'auto' ? 'palm' : sideMode === 'palm' ? 'back' : 'auto';
+    $('side').textContent = `Side: ${sideMode}`;
     if (mode === 'photo') rerenderPhoto();
   });
   $('shade').addEventListener('click', () => {
