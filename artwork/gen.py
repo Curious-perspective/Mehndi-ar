@@ -439,7 +439,7 @@ def build(side, fontfile, outname):
     body = []
     for a in art:
         if isinstance(a, tuple) and a[0] == "NAMES":
-            body.append(names_svg(fontfile, a[1], a[2]))
+            body.append(names_hand(a[1], a[2], fontfile))
         else:
             body.append(a)
     lm_json = json.dumps({str(k): v for k, v in L.items()})
@@ -451,8 +451,85 @@ def build(side, fontfile, outname):
 </svg>'''
     open(outname, "w").write(svg)
 
+# ---------- hand-written lettering (no typeface): own pen strokes, smoothed ----------
+# units: x-height = 1, baseline y = 0, up = negative. Each letter: list of strokes (point lists).
+CURSIVE = {
+    "A": [[(0.0, 0.0), (0.42, -1.3), (0.68, -2.2), (0.8, -1.2), (0.95, 0.0)], [(0.15, -0.85), (0.6, -0.95), (1.2, -0.85), (1.35, -0.4), (1.2, -0.1)]],
+    "k": [[(0, -0.1), (0.25, -1.3), (0.35, -2.1), (0.18, -2.2), (0.1, -1.6), (0.12, 0.0)], [(0.12, -0.45), (0.5, -0.95), (0.62, -0.75), (0.35, -0.5), (0.2, -0.45), (0.5, -0.35), (0.62, 0.0), (0.85, -0.15)]],
+    "s": [[(0, -0.1), (0.35, -1.0), (0.42, -0.6), (0.55, -0.25), (0.4, 0.0), (0.15, -0.05), (0.3, -0.06), (0.7, -0.15)]],
+    "h": [[(0, -0.1), (0.25, -1.3), (0.35, -2.1), (0.18, -2.2), (0.1, -1.6), (0.1, 0.0), (0.2, -0.7), (0.45, -1.0), (0.6, -0.7), (0.6, -0.15), (0.72, 0.0), (0.9, -0.15)]],
+    "a": [[(0.75, -0.8), (0.45, -1.0), (0.12, -0.75), (0.08, -0.2), (0.35, 0.02), (0.68, -0.4), (0.76, -1.0), (0.74, -0.35), (0.85, 0.0), (1.05, -0.15)]],
+    "y": [[(0, -0.9), (0.1, -0.35), (0.3, -0.02), (0.55, -0.4), (0.62, -0.95), (0.6, 0.3), (0.45, 0.9), (0.2, 0.95), (0.25, 0.55), (0.75, 0.05), (0.95, -0.2)]],
+    "w": [[(0, -0.9), (0.05, -0.3), (0.25, 0.0), (0.42, -0.45), (0.45, -0.75), (0.5, -0.3), (0.7, 0.0), (0.88, -0.5), (0.9, -0.95), (0.85, -0.8), (1.1, -0.85)]],
+    "e": [[(0, -0.15), (0.4, -0.5), (0.5, -0.85), (0.35, -1.0), (0.15, -0.7), (0.15, -0.2), (0.4, 0.0), (0.7, -0.2)]],
+    "d": [[(0.75, -0.8), (0.45, -1.0), (0.12, -0.75), (0.08, -0.2), (0.35, 0.02), (0.68, -0.4), (0.8, -1.4), (0.85, -2.15), (0.78, -1.0), (0.78, -0.3), (0.9, 0.0), (1.08, -0.15)]],
+    "r": [[(0, -0.1), (0.2, -0.85), (0.3, -1.0), (0.38, -0.85), (0.45, -0.9), (0.6, -0.95), (0.55, -0.4), (0.62, 0.0), (0.82, -0.15)]],
+    "S": [[(1.0, -1.9), (0.62, -2.2), (0.25, -1.98), (0.3, -1.45), (0.75, -0.95), (0.82, -0.35), (0.48, 0.02), (0.08, -0.15), (0.0, -0.4)], [(0.75, -0.08), (1.0, -0.15)]],
+}
+CAPS = {  # simple hand-printed capitals, 4 x 6 grid → scaled to cap height 2
+    "A": [[(0, 6), (2, 0), (4, 6)], [(0.9, 3.8), (3.1, 3.8)]],
+    "K": [[(0, 0), (0, 6)], [(3.8, 0), (0, 3.4)], [(1.3, 2.5), (4, 6)]],
+    "S": [[(4, 1), (3, 0), (1, 0), (0, 1), (0, 2.2), (1, 3), (3, 3), (4, 3.8), (4, 5), (3, 6), (1, 6), (0, 5)]],
+    "H": [[(0, 0), (0, 6)], [(4, 0), (4, 6)], [(0, 3), (4, 3)]],
+    "Y": [[(0, 0), (2, 3)], [(4, 0), (2, 3), (2, 6)]],
+    "R": [[(0, 6), (0, 0), (3, 0), (4, 1), (4, 2), (3, 3), (0, 3)], [(1.6, 3), (4, 6)]],
+    "E": [[(4, 0), (0, 0), (0, 6), (4, 6)], [(0, 3), (3, 3)]],
+    "W": [[(0, 0), (0.8, 6), (2, 2.2), (3.2, 6), (4, 0)]],
+    "D": [[(0, 0), (0, 6), (2, 6), (3.4, 5), (4, 3), (3.4, 1), (2, 0), (0, 0)]],
+}
+
+def smooth(pts, n=10):
+    if len(pts) < 3: return pts
+    ext = [pts[0]] + pts + [pts[-1]]; out = []
+    for i in range(len(pts) - 1):
+        p0, p1, p2, p3 = ext[i], ext[i + 1], ext[i + 2], ext[i + 3]
+        for k in range(n):
+            t = k / n
+            out.append(tuple(0.5 * ((2 * p1[j]) + (-p0[j] + p2[j]) * t + (2 * p0[j] - 5 * p1[j] + 4 * p2[j] - p3[j]) * t * t + (-p0[j] + 3 * p1[j] - 3 * p2[j] + p3[j]) * t ** 3) for j in range(2)))
+    out.append(pts[-1]); return out
+
+def write_word(word, x0, y0, u, style, w):
+    """returns (svg, width). style 'cursive' or 'caps'. u = x-height in px"""
+    s = ""; x = x0
+    for ch in word:
+        if style == "cursive":
+            strokes = CURSIVE[ch]; sc = u; adv = max(p[0] for st in strokes for p in st)
+            tr = lambda p: (x + p[0] * sc, y0 + p[1] * sc)
+            sm = True
+        else:
+            strokes = CAPS[ch.upper()]; sc = u * 2 / 6; adv = 4 * sc / u + 0.35
+            tr = lambda p: (x + p[0] * sc, y0 - 2 * u + p[1] * sc)
+            sm = False
+        for st in strokes:
+            pts = [tr(p) for p in (smooth(st) if sm else st)]
+            d = "M" + " L".join(f"{f(a)},{f(b)}" for a, b in pts)
+            s += f'<path d="{d}" fill="none" stroke="{FILL}" stroke-width="{w}" stroke-linecap="round" stroke-linejoin="round"/>'
+            # cone blob where the artist lifts the cone
+            s += dot(pts[-1], w * 0.62) + dot(pts[0], w * 0.55)
+        x += adv * (u if style == "cursive" else u) + (0.08 * u if style == "cursive" else 0)
+    return s, x - x0
+
+def names_hand(cx, cy, style):
+    s = ""
+    if style == "cursive":
+        u = 19
+        for word, dy, uu in [("Akshay", -18, u), ("weds", 12, u * 0.62), ("Shreya", 58, u)]:
+            _, wd = write_word(word, 0, 0, uu, style, 1)
+            sv, _ = write_word(word, cx - wd / 2, cy + dy, uu, style, 3.0 if uu == u else 2.2)
+            s += sv
+    else:
+        u = 12.5
+        for word, dy, uu, w in [("AKSHAY", -14, u, 3.4), ("WEDS", 16, u * 0.6, 2.4), ("SHREYA", 58, u, 3.4)]:
+            _, wd = write_word(word, 0, 0, uu, style, 1)
+            sv, _ = write_word(word, cx - wd / 2 + uu * 0.17, cy + dy, uu, style, w)
+            s += sv
+    s += g(f'<path d="M0,6 C-12,-4 -6,-14 0,-6 C6,-14 12,-4 0,6 Z" fill="{FILL}"/>', cx + 50, cy + 6, 0, 0.8)
+    s += "".join(dot((cx - 48 - k * 8, cy + 8), 2.6 - k * 0.6) for k in range(3))
+    return s
+
 if __name__ == "__main__":
-    font = sys.argv[1] if len(sys.argv) > 1 else "Sacramento-Regular.ttf"
-    build("palm", font, "palm.svg")
-    build("back", font, "back.svg")
+    style = sys.argv[1] if len(sys.argv) > 1 else "cursive"
+    build("palm", style, f"palm_{style}.svg")
+    build("back", style, "back.svg")
     print("ok")
+
