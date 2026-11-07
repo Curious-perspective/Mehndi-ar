@@ -434,19 +434,20 @@ def names_svg(fontfile, cx, cy):
     return s
 
 # ---------- assemble ----------
-def build(side, fontfile, outname):
+def build(side, fontfile, outname, art_only=False, mirror_names=False):
     art = palm_art() if side == "palm" else back_art()
     body = []
     for a in art:
         if isinstance(a, tuple) and a[0] == "NAMES":
-            body.append(names_hand(a[1], a[2], fontfile))
+            nm = names_hand(a[1], a[2], fontfile)
+            if mirror_names: nm = f'<g transform="translate({2 * a[1]},0) scale(-1,1)">{nm}</g>'
+            body.append(nm)
         else:
             body.append(a)
     lm_json = json.dumps({str(k): v for k, v in L.items()})
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" data-landmarks='{lm_json}' data-side="{side}">
 <defs><mask id="hand"><rect width="{W}" height="{H}" fill="black"/>{hand_shapes("white")}</mask></defs>
-<rect width="{W}" height="{H}" fill="#fbf6ef"/>
-<g id="skin">{hand_shapes(EDGE, 2)}{hand_shapes(SKIN)}</g>
+{f'<rect width="{W}" height="{H}" fill="{SKIN}"/>' if art_only else f'<rect width="{W}" height="{H}" fill="#fbf6ef"/><g id="skin">{hand_shapes(EDGE, 2)}{hand_shapes(SKIN)}</g>'}
 <g id="art" mask="url(#hand)">{"".join(body)}</g>
 </svg>'''
     open(outname, "w").write(svg)

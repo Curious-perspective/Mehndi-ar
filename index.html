@@ -140,7 +140,9 @@
       });
       // palm/back: only trust confident handedness, and only switch after N consistent frames (MediaPipe's label flickers)
       const label = hd[i] ? hd[i].label : null, score = hd[i] ? hd[i].score : 0;
-      const raw = label && score > 0.7 ? isPalmFacing(pts, label) : null;
+      // only trust a confident label, and only when the hand isn't edge-on (orientation signal near zero)
+      const sinA = (() => { const w0 = pts[0], a0 = pts[5], b0 = pts[17]; const cr = (a0.x - w0.x) * (b0.y - w0.y) - (a0.y - w0.y) * (b0.x - w0.x); return cr / ((dist(w0, a0) * dist(w0, b0)) || 1); })();
+      const raw = label && score > 0.7 && Math.abs(sinA) > 0.25 ? isPalmFacing(pts, label) : null;
       const hand = { pts, palm: prev ? prev.palm : (raw === null ? true : raw), cand: prev ? prev.cand : null, candN: prev ? prev.candN : 0 };
       const need = mode === 'live' ? 5 : 1;
       if (raw !== null && raw !== hand.palm) {
@@ -282,8 +284,7 @@
     ctx.clip(handSilhouette(lm, palmWidth, scale));
     if (styleName === 'bridal') {
       const palmFacing = sideMode === 'auto' ? hand.palm : sideMode === 'palm';
-      if (palmFacing) drawBridalPalm(lm, scale, palmWidth, fingerW, P, lw);
-      else drawBridalBack(lm, scale, palmWidth, fingerW, P, lw);
+      drawBridalArt(lm, palmFacing);
     } else drawClassic(lm, scale, palmWidth, fingerW, palm, rot, P, lw);
     ctx.restore();
   }
@@ -380,6 +381,70 @@
       const w0 = lm[0], d = { x: -Math.sin(rot), y: Math.cos(rot) };
       thickSegment({ x: w0.x - d.x * palmWidth * 0.55, y: w0.y - d.y * palmWidth * 0.55 }, { x: w0.x + d.x * palmWidth * 0.55, y: w0.y + d.y * palmWidth * 0.55 }, lw, P.line);
     }
+  }
+
+
+  // ---------- artwork warp (Bridal): textures authored on a hand template, bent onto the live hand ----------
+  const MESH = {"scale": 0.6, "uv": [[300.0, 702.0], [244.8, 654.0], [202.8, 603.0], [169.2, 558.0], [144.0, 517.2], [231.0, 474.0], [217.2, 369.0], [210.0, 303.0], [205.8, 247.2], [300.0, 459.0], [300.0, 343.2], [300.0, 270.0], [300.0, 211.2], [367.2, 466.8], [376.8, 358.8], [382.8, 292.8], [386.4, 241.2], [427.2, 492.0], [448.8, 403.2], [460.8, 351.0], [469.2, 309.0], [152.23, 702.0], [231.04, 702.0], [300.0, 702.0], [368.96, 702.0], [447.77, 702.0], [152.23, 811.35], [231.04, 811.35], [300.0, 811.35], [368.96, 811.35], [447.77, 811.35], [152.23, 920.7], [231.04, 920.7], [300.0, 920.7], [368.96, 920.7], [447.77, 920.7], [152.23, 1030.05], [231.04, 1030.05], [300.0, 1030.05], [368.96, 1030.05], [447.77, 1030.05], [447.77, 629.1], [152.23, 629.1], [447.77, 544.05], [152.23, 544.05], [128.88, 492.72], [203.28, 213.72], [300.0, 175.92], [388.56, 210.24], [474.24, 283.8]], "tri": [[6, 5, 45], [7, 6, 45], [47, 12, 46], [48, 12, 47], [22, 42, 1], [31, 36, 45], [26, 31, 45], [25, 41, 49], [41, 43, 49], [43, 41, 1], [7, 8, 11], [12, 8, 46], [8, 12, 11], [46, 8, 45], [8, 7, 45], [16, 12, 48], [12, 16, 11], [16, 15, 11], [16, 48, 49], [15, 16, 49], [15, 10, 11], [7, 10, 6], [10, 7, 11], [42, 2, 1], [22, 21, 42], [21, 26, 45], [42, 21, 45], [30, 25, 49], [0, 22, 1], [43, 20, 49], [19, 20, 43], [20, 15, 49], [20, 19, 15], [43, 13, 17], [13, 43, 1], [19, 14, 15], [14, 10, 15], [2, 3, 5], [3, 2, 42], [40, 35, 49], [35, 30, 49], [24, 41, 25], [41, 24, 1], [24, 0, 1], [9, 5, 6], [10, 9, 6], [9, 2, 5], [14, 9, 10], [9, 14, 13], [2, 9, 1], [9, 13, 1], [13, 18, 17], [14, 18, 13], [18, 14, 19], [18, 43, 17], [18, 19, 43], [5, 4, 45], [3, 4, 5], [44, 3, 42], [44, 4, 3], [44, 42, 45], [4, 44, 45], [27, 21, 22], [21, 27, 26], [32, 37, 36], [31, 32, 36], [27, 32, 26], [32, 31, 26], [39, 35, 40], [35, 39, 34], [33, 39, 38], [39, 33, 34], [37, 33, 38], [32, 33, 37], [28, 27, 22], [0, 28, 22], [28, 32, 27], [28, 33, 32], [29, 24, 25], [30, 29, 25], [29, 28, 0], [24, 29, 0], [29, 35, 34], [35, 29, 30], [33, 29, 34], [28, 29, 33]]};
+  const TEX = {};
+  for (const [k, src] of [['palmA', 'art/palm_a.png'], ['palmB', 'art/palm_b.png'], ['back', 'art/back.png']]) {
+    const im = new Image(); im.onload = () => { TEX[k] = im; }; im.src = src;
+  }
+  // template orientation sign (palm triangle wrist→index MCP→pinky MCP)
+  const TSIGN = (() => { const u = MESH.uv; return Math.sign((u[5][0] - u[0][0]) * (u[17][1] - u[0][1]) - (u[5][1] - u[0][1]) * (u[17][0] - u[0][0])); })();
+
+  function extraPts(lm) {
+    const w = lm[0], m9 = lm[9], i5 = lm[5], p17 = lm[17];
+    const sc = dist(w, m9), u = { x: (m9.x - w.x) / sc, y: (m9.y - w.y) / sc }, n = { x: -u.y, y: u.x }, pw = dist(i5, p17);
+    const pts = [];
+    for (const k of [0, 0.45, 0.9, 1.35]) { const c = { x: w.x - u.x * sc * k, y: w.y - u.y * sc * k }; for (const j of [-0.75, -0.35, 0, 0.35, 0.75]) pts.push({ x: c.x + n.x * pw * j, y: c.y + n.y * pw * j }); }
+    for (const t of [0.3, 0.65]) { const c = { x: w.x + u.x * sc * t, y: w.y + u.y * sc * t }; pts.push({ x: c.x + n.x * pw * 0.75, y: c.y + n.y * pw * 0.75 }, { x: c.x - n.x * pw * 0.75, y: c.y - n.y * pw * 0.75 }); }
+    for (const [i, j] of [[4, 3], [8, 7], [12, 11], [16, 15], [20, 19]]) pts.push({ x: lm[i].x + (lm[i].x - lm[j].x) * 0.6, y: lm[i].y + (lm[i].y - lm[j].y) * 0.6 });
+    return pts;
+  }
+
+  function drawWarp(lm, img) {
+    const D = lm.concat(extraPts(lm)), U = MESH.uv;
+    // reference scale/orientation from the palm triangle; pieces that fold over (curled fingers) or blow up are skipped
+    const det3 = (i, j, k) => {
+      const su = (U[j][0] - U[i][0]) * (U[k][1] - U[i][1]) - (U[k][0] - U[i][0]) * (U[j][1] - U[i][1]);
+      const sd = (D[j].x - D[i].x) * (D[k].y - D[i].y) - (D[k].x - D[i].x) * (D[j].y - D[i].y);
+      return su ? sd / su : 0;
+    };
+    const ref = det3(0, 5, 17);
+    if (!ref) return;
+    for (const [a, b, c] of MESH.tri) {
+      const dt = det3(a, b, c);
+      if (Math.sign(dt) !== Math.sign(ref) || Math.abs(dt / ref) > 6) continue;
+      const u0 = U[a], u1 = U[b], u2 = U[c], p0 = D[a], p1 = D[b], p2 = D[c];
+      const den = (u1[0] - u0[0]) * (u2[1] - u0[1]) - (u2[0] - u0[0]) * (u1[1] - u0[1]);
+      if (Math.abs(den) < 1e-6) continue;
+      // affine src(u,v) → dst(x,y)
+      const ma = ((p1.x - p0.x) * (u2[1] - u0[1]) - (p2.x - p0.x) * (u1[1] - u0[1])) / den;
+      const mc = ((p2.x - p0.x) * (u1[0] - u0[0]) - (p1.x - p0.x) * (u2[0] - u0[0])) / den;
+      const mb = ((p1.y - p0.y) * (u2[1] - u0[1]) - (p2.y - p0.y) * (u1[1] - u0[1])) / den;
+      const md = ((p2.y - p0.y) * (u1[0] - u0[0]) - (p1.y - p0.y) * (u2[0] - u0[0])) / den;
+      const me = p0.x - ma * u0[0] - mc * u0[1], mf = p0.y - mb * u0[0] - md * u0[1];
+      // clip to the destination triangle, grown ~0.8px to hide seams
+      const cx = (p0.x + p1.x + p2.x) / 3, cy = (p0.y + p1.y + p2.y) / 3;
+      const grow = q => { const dx = q.x - cx, dy = q.y - cy, L = Math.hypot(dx, dy) || 1; return { x: q.x + dx / L * 0.8, y: q.y + dy / L * 0.8 }; };
+      const g0 = grow(p0), g1 = grow(p1), g2 = grow(p2);
+      ctx.save();
+      ctx.beginPath(); ctx.moveTo(g0.x, g0.y); ctx.lineTo(g1.x, g1.y); ctx.lineTo(g2.x, g2.y); ctx.closePath(); ctx.clip();
+      ctx.transform(ma, mb, mc, md, me, mf);
+      ctx.drawImage(img, 0, 0);
+      ctx.restore();
+    }
+  }
+
+  function drawBridalArt(lm, palmFacing) {
+    if (!palmFacing) { if (TEX.back) drawWarp(lm, TEX.back); return; }
+    // does the warp reflect the art on screen? then use the copy with pre-mirrored names so they read correctly
+    const live = Math.sign((lm[5].x - lm[0].x) * (lm[17].y - lm[0].y) - (lm[5].y - lm[0].y) * (lm[17].x - lm[0].x));
+    const screenMirror = mode === 'live' && facing === 'user';
+    const reflected = (live !== TSIGN) !== screenMirror;
+    const img = reflected ? TEX.palmB : TEX.palmA;
+    if (img) drawWarp(lm, img);
   }
 
   // ---------- palm / back detection ----------
