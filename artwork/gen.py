@@ -750,6 +750,113 @@ def half_sun3(r):
     s += f'<path d="M{-r * 0.18},0 A{r * 0.18},{r * 0.18} 0 0 1 {r * 0.18},0 Z" fill="{FILL}"/>'
     return s
 
+# ---------- BACK v3: same connected style ----------
+def finger_back(fi):
+    p1, p2, p3, p4 = [P(k) for k in FINGERS[fi]]
+    wd = FW[fi]; s = ""
+    def seg(a, b, body_fn, t0=0.0, t1=1.0):
+        a2, b2 = lerp(a, b, t0), lerp(a, b, t1)
+        c = lerp(a2, b2, 0.5); rot = ang(a, b) + 90; Ls = dist(a2, b2)
+        return g(clip_to(rect_d(-wd, -Ls / 2, 2 * wd, Ls), body_fn(wd, Ls)), c[0], c[1], rot)
+    def thick_across(pt, a, b, w=THICK, second=True):
+        rot = ang(a, b) + 90
+        return g(line((-wd, 0), (wd, 0), w) + (line((-wd, 7), (wd, 7), 1.6) if second else ""), pt[0], pt[1], rot)
+    # distal: bare nail area; leaves fanning towards the nail on clean skin, fringed band at the joint
+    def distal(w_, L_):
+        b = ""
+        for x_, a_, sz in [(-wd * 0.27, -14, 0.85), (0, 0, 1.0), (wd * 0.27, 14, 0.85)]:
+            b += g(teardrop(L_ * 0.8 * sz, wd * 0.12 * sz), x_, L_ / 2 - 4, a_)
+        return b
+    s += seg(p3, p4, distal, 0.0, 0.5)
+    rotd = ang(p4, p3) + 90
+    fr = ""
+    for k in range(9):
+        x = -wd * 0.45 + k * wd * 0.9 / 8
+        fr += line((x, -1), (x, -12), 1.6)
+    s += g(fr, p3[0], p3[1], rotd)     # fringe on the nail side of the joint
+    s += thick_across(p3, p4, p2)
+    # middle phalanx: cross-hatch fill, flower on clean skin
+    def mid(w_, L_):
+        b = pat_crosshatch(-w_, -L_ / 2, w_, L_ / 2, 10, 1.0)
+        b += knock((0, 0), wd * 0.36) + circ((0, 0), wd * 0.36, 2.4) + mini_flower(wd * 0.3)
+        return b
+    if fi == 0:
+        s += seg(p2, p3, lambda w_, L_: pat_lattice_flowers(-w_, -L_ / 2, w_, L_ / 2, 24))
+        s += thick_across(p2, p3, p1)
+        return s
+    s += seg(p2, p3, mid)
+    s += thick_across(p2, p3, p1)
+    # proximal phalanx: dotted fill with a clean stripe carrying the dot trail (photo 2)
+    def prox(w_, L_):
+        b = pat_dots(-w_, -L_ / 2, w_, L_ / 2, 8, 1.6)
+        b += f'<rect x="{f(-w_)}" y="{f(-L_ * 0.3)}" width="{f(2 * w_)}" height="{f(L_ * 0.6)}" fill="{SKIN}"/>'
+        b += line((-w_, -L_ * 0.3), (w_, -L_ * 0.3), 2.4) + line((-w_, L_ * 0.3), (w_, L_ * 0.3), 2.4)
+        b += dot((0, -L_ * 0.12), 7) + dot((0, L_ * 0.06), 4.4) + dot((0, L_ * 0.19), 2.8)
+        return b
+    s += seg(p1, p2, prox)
+    return s
+
+def back_art():
+    out = []
+    pd = palm_path()
+    box = (330, 700, 790, 1220)
+    # ribbon of clean skin carrying the floral trail, wrist (pinky side) → ring-finger base
+    rib = "M600,1215 C560,1120 520,1060 540,980 C560,900 600,860 620,780"
+    left = "M330,700 L620,700 L620,780 C600,860 560,900 540,980 C520,1060 560,1120 600,1215 L330,1215 Z"
+    out.append(clip_to(pd, clip_to(left, pat_lattice_flowers(*box, 28)) +
+                       clip_to(f"M790,700 L620,700 L620,780 C600,860 560,900 540,980 C520,1060 560,1120 600,1215 L790,1215 Z", pat_scales(*box, 14, 1.4))))
+    # thick divider across the lattice region (knuckle side vs wrist side) for a second fill
+    out.append(clip_to(pd, clip_to(left, clip_to("M330,700 L620,700 L620,780 L330,930 Z", f'<rect x="330" y="700" width="300" height="240" fill="{SKIN}"/>' + pat_hatch(330, 700, 630, 940, 7, 1.1)))))
+    out.append(clip_to(pd, line((330, 930), (560, 812), THICK)))
+    out.append(clip_to(pd, f'<path d="{rib}" fill="none" stroke="{INK}" stroke-width="{188 + 2 * THICK}" stroke-linecap="butt"/>'
+                           f'<path d="{rib}" fill="none" stroke="{SKIN}" stroke-width="188" stroke-linecap="butt"/>'))
+    # knuckle line with a jewel on each knuckle
+    knuckle = "M352,800 C420,772 470,766 500,766 C560,766 640,774 760,826"
+    out.append(clip_to(pd, f'<path d="{knuckle}" fill="none" stroke="{INK}" stroke-width="{THICK}"/>'))
+    for i in (5, 9, 13, 17):
+        x, y = P(i); y += 14
+        out.append(knock((x, y), 19) + circ((x, y), 19, 3) + g(spiral(12, 2.2, 1.8), x, y) + dot_ring(24, 12, 1.8).replace('cx="', 'cx="').join(["", ""]) )
+        out.append(g(dot_ring(24, 12, 1.9), x, y))
+    # floral trail on the ribbon (photo 3)
+    out.append(g(shaded_flower(78, 5), 572, 1124, 12))
+    out.append(g(paisley(124), 548, 1000, -24))
+    out.append(g(shaded_flower(70, 4), 580, 872, -12))
+    out.append(dot_chain([(640, 1080), (660, 1010), (640, 940), (610, 905)], 10, r=4))
+    out.append(dot_chain([(500, 1080), (478, 1040), (474, 990)], 10, r=3.8))
+    # fingers
+    for fi in range(5):
+        out.append(finger_back(fi))
+    out.append(cuff_back(1196))
+    return out
+
+def cuff_back(y0):
+    xl, xr = 380, 660
+    s = ""; y = y0
+    def hl(y, w=THICK): return line((xl, y), (xr, y), w)
+    def bandfill(ya, yb, pat): return clip_to(rect_d(xl, ya, xr - xl, yb - ya), pat)
+    s += hl(y)
+    yb = y + 32   # scallops on hatch
+    s += bandfill(y, yb, pat_hatch(xl, y, xr, yb, 7, 1.1))
+    n = 12
+    for k in range(n):
+        x0 = xl + k * (xr - xl) / n; x1 = xl + (k + 1) * (xr - xl) / n
+        s += f'<path d="M{f(x0)},{f(y)} Q{f((x0 + x1) / 2)},{f(y + 50)} {f(x1)},{f(y)} Z" fill="{SKIN}" stroke="{INK}" stroke-width="2.2"/>'
+        s += dot(((x0 + x1) / 2, y + 12), 3.2)
+    y = yb; s += hl(y)
+    yb = y + 30   # dots row on clean skin
+    for k in range(15): s += dot((xl + 10 + k * (xr - xl - 20) / 14, y + 15), 4.2)
+    y = yb; s += hl(y)
+    yb = y + 44   # four-petal stars on cross-hatch
+    s += bandfill(y, yb, pat_crosshatch(xl, y, xr, yb, 9, 1.0))
+    for k in range(7):
+        x = xl + 20 + k * (xr - xl - 40) / 6
+        s += knock((x, (y + yb) / 2), 17) + g(four_petal_star(15), x, (y + yb) / 2)
+    y = yb; s += hl(y)
+    # hanging dot-chain bracelet with drop (photo 3's delicacy), attached to the last band
+    s += dot_chain([(xl + 10, y + 4), (460, y + 40), (520, y + 52), (580, y + 40), (xr - 10, y + 4)], 9, r=3.6)
+    s += g(teardrop(26, 10), 520, y + 60, 180) + dot((520, y + 98), 6)
+    return s
+
 if __name__ == "__main__":
     style = sys.argv[1] if len(sys.argv) > 1 else "cursive"
     build("palm", style, f"palm_{style}.svg")
