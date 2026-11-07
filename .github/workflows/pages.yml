@@ -1,7 +1,8 @@
 name: Deploy to GitHub Pages
+# main is served at the site root; dev is served at /dev/ for previewing
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 permissions:
   contents: read
@@ -18,11 +19,13 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with: { ref: main, path: site }
+      - uses: actions/checkout@v4
+        with: { ref: dev, path: site/dev }
+        continue-on-error: true
+      - run: rm -rf site/.git site/dev/.git site/.github site/dev/.github
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
-        with:
-          path: .
+        with: { path: site }
       - id: deployment
         uses: actions/deploy-pages@v4
