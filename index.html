@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Mehndi AR — live henna on your hands</title>
+<meta name="theme-color" content="#1a0c06">
+<style>
+  :root { --henna: #7a2e0e; --cream: #fff3e2; --gold: #d9a441; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: #1a0c06; color: var(--cream); font-family: Georgia, "Times New Roman", serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #000; }
+  #video, #overlay, #photo { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+  #photo { display: none; }
+  .mirror { transform: scaleX(-1); }
+  #overlay { pointer-events: none; mix-blend-mode: multiply; }
+
+  #top { position: fixed; top: 0; left: 0; right: 0; padding: max(12px, env(safe-area-inset-top)) 16px 10px; background: linear-gradient(rgba(0,0,0,.65), rgba(0,0,0,0)); display: flex; justify-content: space-between; align-items: center; z-index: 5; }
+  #top h1 { margin: 0; font-size: 18px; font-weight: normal; letter-spacing: .5px; color: var(--cream); }
+  #top h1 span { color: var(--gold); }
+  #status { font-size: 12px; opacity: .85; }
+
+  #bottom { position: fixed; bottom: 0; left: 0; right: 0; padding: 12px 12px max(14px, env(safe-area-inset-bottom)); background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.75)); z-index: 5; display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  button { border: 1px solid rgba(255,243,226,.35); background: rgba(26,12,6,.55); color: var(--cream); padding: 9px 14px; border-radius: 999px; font: inherit; font-size: 14px; cursor: pointer; }
+  button.on { background: var(--henna); border-color: var(--gold); }
+  button.primary { background: var(--gold); color: #2a1206; border-color: var(--gold); font-weight: bold; padding: 11px 22px; }
+
+  #gate { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; padding: 28px; background: radial-gradient(circle at 50% 30%, #3a1608, #1a0c06 70%); }
+  #gate h2 { font-weight: normal; font-size: 26px; margin: 0; }
+  #gate p { max-width: 420px; line-height: 1.5; opacity: .9; margin: 0; }
+  #gate .alt { font-size: 13px; opacity: .7; }
+  #fileIn { display: none; }
+  #toast { position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%); background: rgba(0,0,0,.8); padding: 8px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .3s; z-index: 6; pointer-events: none; }
+  #toast.show { opacity: 1; }
+  #snapView { position: fixed; inset: 0; z-index: 20; background: #000; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
+  #snapView img { max-width: 100%; max-height: 80%; }
+  #snapView p { font-size: 13px; opacity: .8; margin: 0; }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="video" class="mirror" autoplay playsinline muted></video>
+  <img id="photo" alt="">
+  <canvas id="overlay" class="mirror"></canvas>
+</div>
+
+<div id="top">
+  <h1>Mehndi <span>AR</span></h1>
+  <div id="status">loading…</div>
+</div>
+
+<div id="bottom">
+  <div class="row" id="styles">
+    <button data-style="mandala" class="on">Mandala</button>
+    <button data-style="arabic">Arabic vine</button>
+    <button data-style="minimal">Minimal</button>
+  </div>
+  <div class="row">
+    <button id="shade">Shade: fresh</button>
+    <button id="flip">Flip camera</button>
+    <button id="snap" class="primary">Snap</button>
+  </div>
+</div>
+
+<div id="gate">
+  <h2>Mehndi AR</h2>
+  <p>Hold any hand in front of the camera and watch the mehndi appear on it — palm, fingers and wrist, tracked live.</p>
+  <button class="primary" id="start">Open camera</button>
+  <p class="alt">No camera access? <a href="#" id="pickPhoto" style="color: var(--gold)">Use a photo instead</a></p>
+  <input id="fileIn" type="file" accept="image/*">
+</div>
+
+<div id="toast"></div>
+<div id="snapView"><img id="snapImg" alt="snapshot"><p>Long-press / right-click the image to save it</p><button id="snapClose">Back</button></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const video = $('video'), photo = $('photo'), canvas = $('overlay'), ctx = canvas.getContext('2d');
+  const statusEl = $('status'), toastEl = $('toast');
+
+  let styleName = 'mandala';
+  let shade = 'fresh';            // fresh | dark
+  let facing = 'user';
+  let stream = null;
+  let mode = 'live';              // live | photo
+  let running = false;
+  let smooth = [];                // smoothed landmarks per hand
+  let lastSeen = 0;
+  let busy = false;
+  let modelReady = false;
+  let photoSrc = null;          // downscaled canvas copy of the chosen photo
+  let lastT = 0;
+
+  const PALETTE = {
+    fresh: { fill: 'rgba(122, 46, 14, 0.86)', line: 'rgba(104, 38, 10, 0.93)', deep: 'rgba(80, 26, 6, 0.97)' },
+    dark:  { fill: 'rgba(70, 20, 5, 0.93)',   line: 'rgba(52, 14, 3, 0.97)',   deep: 'rgba(36, 8, 2, 1)' }
+  };
+
+  function toast(msg, ms = 2200) { toastEl.textContent = msg; toastEl.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => toastEl.classList.remove('show'), ms); }
+
+  // ---------- MediaPipe ----------
+  const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.userAgent.includes('Mac') && 'ontouchend' in document);
+  hands.setOptions({ maxNumHands: 2, modelComplexity: isMobile ? 0 : 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6, selfieMode: false });
+  hands.onResults(onResults);
+
+  function fitCanvas(w, h) { if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; } }
+
+  function onResults(res) {
+    const w = res.image.width, h = res.image.height;
+    fitCanvas(w, h);
+    ctx.clearRect(0, 0, w, h);
+    const list = res.multiHandLandmarks || [];
+    if (list.length) {
+      lastSeen = performance.now();
+      statusEl.textContent = list.length === 1 ? '1 hand' : `${list.length} hands`;
+    } else if (performance.now() - lastSeen > 800) {
+      statusEl.textContent = 'show a hand';
+    }
+    // exponential smoothing to kill jitter; each hand matched to its nearest previous wrist (MediaPipe does not keep a stable order)
+    const alpha = mode === 'live' ? 0.55 : 1;
+    const out = list.map(lm => {
+      const wx = lm[0].x * w, wy = lm[0].y * h;
+      let prev = null, best = Infinity;
+      for (const sm of smooth) { const d = Math.hypot(sm[0].x - wx, sm[0].y - wy); if (d < best) { best = d; prev = sm; } }
+      if (best > 0.15 * Math.max(w, h)) prev = null;
+      return lm.map((p, j) => {
+        const x = p.x * w, y = p.y * h;
+        return prev ? { x: prev[j].x + (x - prev[j].x) * alpha, y: prev[j].y + (y - prev[j].y) * alpha } : { x, y };
+      });
+    });
+    // hold the last drawing through a single dropped frame
+    smooth = out.length ? out : (performance.now() - lastSeen < 150 ? smooth : []);
+    for (const lm of smooth) drawHand(lm);
+  }
+
+  // ---------- geometry helpers ----------
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+  const ang = (a, b) => Math.atan2(b.y - a.y, b.x - a.x);
+
+  function dot(x, y, r, color) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); }
+
+  function petalRing(cx, cy, r, n, rot, color, lw) {
+    // n teardrop petals pointing outward from radius r*0.35 to r
+    ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineJoin = 'round';
+    for (let i = 0; i < n; i++) {
+      const a = rot + (i / n) * Math.PI * 2;
+      const s = { x: cx + Math.cos(a) * r * 0.35, y: cy + Math.sin(a) * r * 0.35 };
+      const e = { x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r };
+      const px = -Math.sin(a), py = Math.cos(a);
+      const bw = r * 0.22;
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.quadraticCurveTo(e.x * 0.6 + s.x * 0.4 + px * bw, e.y * 0.6 + s.y * 0.4 + py * bw, e.x, e.y);
+      ctx.quadraticCurveTo(e.x * 0.6 + s.x * 0.4 - px * bw, e.y * 0.6 + s.y * 0.4 - py * bw, s.x, s.y);
+      ctx.stroke();
+    }
+  }
+
+  function scallopRing(cx, cy, r, n, rot, color, lw) {
+    ctx.strokeStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const a0 = rot + (i / n) * Math.PI * 2, a1 = rot + ((i + 1) / n) * Math.PI * 2, am = (a0 + a1) / 2;
+      const p0 = { x: cx + Math.cos(a0) * r, y: cy + Math.sin(a0) * r };
+      const p1 = { x: cx + Math.cos(a1) * r, y: cy + Math.sin(a1) * r };
+      const c = { x: cx + Math.cos(am) * r * 1.22, y: cy + Math.sin(am) * r * 1.22 };
+      if (i === 0) ctx.moveTo(p0.x, p0.y);
+      ctx.quadraticCurveTo(c.x, c.y, p1.x, p1.y);
+    }
+    ctx.stroke();
+  }
+
+  function dotRing(cx, cy, r, n, rot, rad, color) {
+    for (let i = 0; i < n; i++) { const a = rot + (i / n) * Math.PI * 2; dot(cx + Math.cos(a) * r, cy + Math.sin(a) * r, rad, color); }
+  }
+
+  function thickSegment(a, b, w, color) {
+    ctx.strokeStyle = color; ctx.lineWidth = w; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+
+  // leaves alternating along a polyline a→b→c (finger)
+  function vine(points, width, color, lw, leaves = true) {
+    ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+    ctx.stroke();
+    if (!leaves) return;
+    let side = 1;
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = points[i], b = points[i + 1];
+      const L = dist(a, b); if (L < 4) continue;
+      const nLeaves = Math.max(1, Math.round(L / (width * 1.6)));
+      for (let k = 0; k < nLeaves; k++) {
+        const t = (k + 0.5) / nLeaves;
+        const p = lerp(a, b, t);
+        const th = ang(a, b) + side * Math.PI / 2;
+        const tip = { x: p.x + Math.cos(th) * width * 0.55, y: p.y + Math.sin(th) * width * 0.55 };
+        const fwd = ang(a, b);
+        const bw = width * 0.22;
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.quadraticCurveTo(p.x + Math.cos(fwd) * bw + Math.cos(th) * width * 0.3, p.y + Math.sin(fwd) * bw + Math.sin(th) * width * 0.3, tip.x, tip.y);
+        ctx.quadraticCurveTo(p.x - Math.cos(fwd) * bw + Math.cos(th) * width * 0.3, p.y - Math.sin(fwd) * bw + Math.sin(th) * width * 0.3, p.x, p.y);
+        ctx.fillStyle = color; ctx.fill();
+        side = -side;
+      }
+    }
+  }
+
+  function diamondChain(a, b, w, color, lw) {
+    const th = ang(a, b), L = dist(a, b), n = Math.max(2, Math.round(L / (w * 0.9)));
+    ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineJoin = 'round';
+    for (let k = 0; k < n; k++) {
+      const p = lerp(a, b, (k + 0.5) / n), r = w * 0.36;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(th);
+      ctx.beginPath(); ctx.moveTo(-r, 0); ctx.lineTo(0, -r * 0.8); ctx.lineTo(r, 0); ctx.lineTo(0, r * 0.8); ctx.closePath(); ctx.stroke();
+      ctx.restore();
+    }
+    dot(a.x, a.y, lw * 1.4, color); dot(b.x, b.y, lw * 1.4, color);
+  }
+
+  function paisley(cx, cy, size, rot, color, lw) {
+    // classic ambi / mango shape
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(rot);
+    ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(0, size * 0.5);
+    ctx.bezierCurveTo(-size * 0.75, size * 0.5, -size * 0.75, -size * 0.55, 0, -size * 0.55);
+    ctx.bezierCurveTo(size * 0.7, -size * 0.55, size * 0.55, size * 0.1, size * 0.15, -size * 0.95);
+    ctx.bezierCurveTo(size * 0.4, -size * 0.2, size * 0.45, size * 0.5, 0, size * 0.5);
+    ctx.stroke();
+    dotRing(0, 0, size * 0.28, 6, 0, lw * 1.1, color);
+    dot(0, 0, lw * 1.6, color);
+    ctx.restore();
+  }
+
+  // ---------- hand drawing ----------
+  // landmark indices: 0 wrist; thumb 1-4; index 5-8; middle 9-12; ring 13-16; pinky 17-20
+  const FINGERS = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]];
+
+  function drawHand(lm) {
+    const P = PALETTE[shade];
+    const scale = dist(lm[0], lm[9]);                     // wrist → middle MCP
+    if (scale < 10) return;
+    const lw = Math.max(1.2, scale * 0.022);
+    const mcp = { x: (lm[5].x + lm[9].x + lm[13].x + lm[17].x) / 4, y: (lm[5].y + lm[9].y + lm[13].y + lm[17].y) / 4 };
+    const palm = lerp(lm[0], mcp, 0.55);
+    const rot = ang(lm[0], lm[9]);
+    const palmWidth = dist(lm[5], lm[17]);
+    const fingerW = palmWidth * 0.2;
+
+    if (styleName === 'mandala') {
+      const R = Math.min(scale * 0.46, palmWidth * 0.5);
+      dot(palm.x, palm.y, R * 0.11, P.deep);
+      dotRing(palm.x, palm.y, R * 0.22, 8, rot, lw * 1.2, P.line);
+      petalRing(palm.x, palm.y, R * 0.62, 8, rot, P.line, lw);
+      scallopRing(palm.x, palm.y, R * 0.72, 12, rot, P.line, lw);
+      dotRing(palm.x, palm.y, R * 0.9, 16, rot + Math.PI / 16, lw * 1.1, P.line);
+      scallopRing(palm.x, palm.y, R * 0.98, 16, rot, P.line, lw * 0.9);
+      // fingers: vines + capped tips
+      for (const f of FINGERS) {
+        const pts = f.map(i => lm[i]);
+        diamondChain(lerp(pts[0], pts[1], 0.12), lerp(pts[0], pts[1], 0.9), fingerW, P.line, lw);
+        vine([pts[1], pts[2]], fingerW, P.line, lw);
+        thickSegment(lerp(pts[2], pts[3], 0.3), pts[3], fingerW * 0.95, P.fill);
+        bandAcross(pts[1], pts[0], pts[2], fingerW, P.line, lw);
+      }
+      wristBand(lm, scale, palmWidth, P, lw);
+    } else if (styleName === 'arabic') {
+      // bold diagonal vine from wrist across palm to index tip, paisleys, leaves
+      const path = [lm[0], lerp(lm[0], lm[5], 0.5), lerp(palm, lm[5], 0.6), lm[5], lm[6], lm[7], lm[8]];
+      vine(path, palmWidth * 0.34, P.fill, lw * 1.6);
+      paisley(lerp(palm, lm[17], 0.35).x, lerp(palm, lm[17], 0.35).y, scale * 0.42, rot + Math.PI * 0.2, P.line, lw);
+      paisley(lerp(lm[0], lm[13], 0.35).x, lerp(lm[0], lm[13], 0.35).y, scale * 0.3, rot - Math.PI * 0.6, P.line, lw);
+      // middle + ring finger: ring bands and caps; pinky + thumb: lighter
+      for (const f of FINGERS.slice(2, 4)) {
+        const pts = f.map(i => lm[i]);
+        thickSegment(lerp(pts[2], pts[3], 0.3), pts[3], fingerW * 0.95, P.fill);
+        bandAcross(pts[1], pts[0], pts[2], fingerW, P.line, lw);
+      }
+      for (const f of [FINGERS[0], FINGERS[4]]) {
+        const pts = f.map(i => lm[i]);
+        thickSegment(lerp(pts[2], pts[3], 0.45), pts[3], fingerW * 0.9, P.fill);
+        dotRing(pts[1].x, pts[1].y, fingerW * 0.4, 4, 0, lw * 1.1, P.line);
+      }
+      wristBand(lm, scale, palmWidth, P, lw, true);
+    } else { // minimal
+      const R = Math.min(scale * 0.3, palmWidth * 0.36);
+      dot(palm.x, palm.y, R * 0.16, P.deep);
+      ctx.strokeStyle = P.line; ctx.lineWidth = lw; ctx.beginPath(); ctx.arc(palm.x, palm.y, R * 0.5, 0, Math.PI * 2); ctx.stroke();
+      dotRing(palm.x, palm.y, R * 0.8, 12, rot, lw * 1.1, P.line);
+      for (const f of FINGERS) {
+        const pts = f.map(i => lm[i]);
+        thickSegment(lerp(pts[2], pts[3], 0.5), pts[3], fingerW * 0.9, P.fill);
+        dot(pts[1].x, pts[1].y, lw * 1.6, P.line);
+      }
+      // thin wrist line with dots
+      const w0 = lm[0], d = { x: -Math.sin(rot), y: Math.cos(rot) };
+      thickSegment({ x: w0.x - d.x * palmWidth * 0.55, y: w0.y - d.y * palmWidth * 0.55 }, { x: w0.x + d.x * palmWidth * 0.55, y: w0.y + d.y * palmWidth * 0.55 }, lw, P.line);
+    }
+  }
+
+  function bandAcross(center, from, to, width, color, lw) {
+    const a = ang(from, to); const d = { x: -Math.sin(a), y: Math.cos(a) };
+    for (const off of [-0.12, 0.12]) {
+      const c = { x: center.x + Math.cos(a) * width * off, y: center.y + Math.sin(a) * width * off };
+      thickSegment({ x: c.x - d.x * width * 0.5, y: c.y - d.y * width * 0.5 }, { x: c.x + d.x * width * 0.5, y: c.y + d.y * width * 0.5 }, lw, color);
+    }
+  }
+
+  function wristBand(lm, scale, palmWidth, P, lw, bold = false) {
+    const rot = ang(lm[0], lm[9]);
+    const d = { x: -Math.sin(rot), y: Math.cos(rot) };
+    const f = { x: Math.cos(rot), y: Math.sin(rot) };
+    const half = palmWidth * 0.6;
+    // two lines slightly below the wrist landmark (towards forearm = opposite of f)
+    for (const off of [0.02, 0.16]) {
+      const c = { x: lm[0].x - f.x * scale * off, y: lm[0].y - f.y * scale * off };
+      thickSegment({ x: c.x - d.x * half, y: c.y - d.y * half }, { x: c.x + d.x * half, y: c.y + d.y * half }, bold && off > 0.1 ? lw * 2.2 : lw, P.line);
+    }
+    // scallops between the lines
+    const c = { x: lm[0].x - f.x * scale * 0.09, y: lm[0].y - f.y * scale * 0.09 };
+    const n = 7;
+    for (let i = 0; i < n; i++) {
+      const t = (i + 0.5) / n - 0.5;
+      const p = { x: c.x + d.x * half * 2 * t, y: c.y + d.y * half * 2 * t };
+      dot(p.x, p.y, lw * 1.3, P.line);
+    }
+  }
+
+  // ---------- camera / loop ----------
+  async function startCamera() {
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    const constraints = { video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false };
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+    await new Promise(r => { const done = () => { video.removeEventListener('loadedmetadata', done); clearTimeout(t); r(); }; const t = setTimeout(done, 2000); video.addEventListener('loadedmetadata', done); });
+    await video.play();
+    const mirror = facing === 'user';
+    video.classList.toggle('mirror', mirror); canvas.classList.toggle('mirror', mirror);
+    mode = 'live'; photo.style.display = 'none'; video.style.display = '';
+    if (!running) { running = true; loop(); }
+  }
+
+  async function loop() {
+    const now = performance.now();
+    if (mode === 'live' && modelReady && video.readyState >= 2 && !busy && now - lastT >= 33) {
+      lastT = now; busy = true;
+      try { await hands.send({ image: video }); } catch (e) { console.error(e); }
+      busy = false;
+    }
+    requestAnimationFrame(loop);
+  }
+
+  async function usePhoto(file) {
+    await ready;
+    if (!modelReady) { toast('Hand-tracking model not loaded — check your connection', 3500); return; }
+    const url = URL.createObjectURL(file);
+    try { await new Promise((res, rej) => { photo.onload = res; photo.onerror = rej; photo.src = url; }); }
+    catch (e) { toast('Could not open that image'); return; }
+    // downscale: huge phone photos exceed GPU texture limits and iOS canvas memory
+    const MAX = 1600, sc = Math.min(1, MAX / Math.max(photo.naturalWidth, photo.naturalHeight));
+    photoSrc = document.createElement('canvas');
+    photoSrc.width = Math.round(photo.naturalWidth * sc); photoSrc.height = Math.round(photo.naturalHeight * sc);
+    photoSrc.getContext('2d').drawImage(photo, 0, 0, photoSrc.width, photoSrc.height);
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    mode = 'photo'; smooth = [];
+    video.style.display = 'none'; photo.style.display = '';
+    photo.classList.remove('mirror'); canvas.classList.remove('mirror');
+    $('gate').style.display = 'none';
+    statusEl.textContent = 'analysing photo…';
+    await rerenderPhoto(true);
+  }
+  async function rerenderPhoto(report = false) {
+    if (busy) return; busy = true;
+    try { await hands.send({ image: photoSrc }); } catch (e) { console.error(e); if (report) toast('Could not analyse photo'); }
+    busy = false;
+  }
+
+  // ---------- UI ----------
+  $('start').addEventListener('click', async () => {
+    statusEl.textContent = 'starting camera…';
+    try {
+      await startCamera();
+      $('gate').style.display = 'none';
+      statusEl.textContent = 'show a hand';
+    } catch (e) {
+      console.error(e);
+      toast('Camera blocked — use a photo instead', 3500);
+      statusEl.textContent = 'camera unavailable';
+    }
+  });
+  $('pickPhoto').addEventListener('click', e => { e.preventDefault(); $('fileIn').click(); });
+  $('fileIn').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) usePhoto(f).catch(() => toast('Could not use that photo')); });
+
+  $('styles').addEventListener('click', e => {
+    const b = e.target.closest('button[data-style]'); if (!b) return;
+    styleName = b.dataset.style;
+    [...$('styles').children].forEach(x => x.classList.toggle('on', x === b));
+    if (mode === 'photo') rerenderPhoto();
+  });
+  $('shade').addEventListener('click', () => {
+    shade = shade === 'fresh' ? 'dark' : 'fresh';
+    $('shade').textContent = `Shade: ${shade}`;
+    if (mode === 'photo') rerenderPhoto();
+  });
+  $('flip').addEventListener('click', async () => {
+    const prevFacing = facing;
+    facing = facing === 'user' ? 'environment' : 'user';
+    smooth = [];
+    try { await startCamera(); }
+    catch (e) { facing = prevFacing; toast('Could not switch camera'); try { await startCamera(); } catch (_) {} }
+  });
+  $('snap').addEventListener('click', () => {
+    const src = mode === 'photo' ? photoSrc : video;
+    const w = canvas.width, h = canvas.height; if (!w) return;
+    const out = document.createElement('canvas'); out.width = w; out.height = h;
+    const o = out.getContext('2d');
+    const mirror = mode === 'live' && facing === 'user';
+    if (mirror) { o.translate(w, 0); o.scale(-1, 1); }
+    o.drawImage(src, 0, 0, w, h);
+    o.globalCompositeOperation = 'multiply';
+    o.drawImage(canvas, 0, 0);
+    try {
+      $('snapImg').src = out.toDataURL('image/jpeg', 0.92);
+      $('snapView').style.display = 'flex';
+    } catch (e) { toast('Snapshot failed'); }
+  });
+  $('snapClose').addEventListener('click', () => { $('snapView').style.display = 'none'; });
+
+  // warm the model up on load so the first frame is quick
+  const ready = hands.initialize()
+    .then(() => { modelReady = true; statusEl.textContent = 'ready'; })
+    .catch(e => { console.error(e); statusEl.textContent = 'model failed to load'; toast('Hand-tracking model failed to load — check your connection', 4000); });
+
+  // iOS Safari freezes/mutes the camera track after app switch or lock — resume or re-acquire on return
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || mode !== 'live') return;
+    const t = stream && stream.getVideoTracks()[0];
+    if (!t || t.readyState === 'ended') startCamera().catch(() => {});
+    else video.play().catch(() => startCamera().catch(() => {}));
+  });
+})();
+</script>
+</body>
+</html>
